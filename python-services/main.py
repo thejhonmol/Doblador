@@ -107,6 +107,8 @@ except Exception as e:
 # Initialize audEERING Age & Gender Classifier (wav2vec2)
 print("Loading Age/Gender Classifier model...")
 import torch
+# Disable cuDNN to avoid 'Could not load symbol cudnnGetLibConfig. Error code 127' aborts on Windows
+torch.backends.cudnn.enabled = False
 import torch.nn as nn
 from transformers import AutoProcessor, Wav2Vec2Model, Wav2Vec2PreTrainedModel
 
