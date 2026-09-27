@@ -33,8 +33,8 @@ if %errorlevel% neq 0 (
     pause
     exit /b %errorlevel%
 )
-echo      -^> Docker containers started successfully.
-timeout /t 2 /nobreak >nul
+echo      -> Docker containers started successfully.
+ping 127.0.0.1 -n 3 >nul
 
 :: 2. Start Python Microservices (FastAPI / MOSS / Demucs / Diarization)
 echo.
@@ -44,7 +44,7 @@ start "Doblador - Python Services" /D "%~dp0python-services" cmd /k "title Dobla
 set PY_TRIES=0
 :wait_python
 set /a PY_TRIES+=1
-timeout /t %PY_WAIT_SECONDS% /nobreak >nul
+ping 127.0.0.1 -n 3 >nul
 curl -s -o NUL -w "%%{http_code}" "http://127.0.0.1:%PY_PORT%/" 2>NUL | findstr /b "200" >NUL
 if not errorlevel 1 goto python_ready
 if %PY_TRIES% GEQ %PY_WAIT_TRIES% goto python_timeout
@@ -76,15 +76,15 @@ if %errorlevel% neq 0 (
 popd
 echo [3/4] Starting Orchestrator (Node.js on port %API_PORT%)...
 start "Doblador - Orchestrator" /D "%~dp0orchestrator" cmd /k "title Doblador - Orchestrator && color 0A && node src/index.js"
-echo      -^> Orchestrator started in background.
-timeout /t 2 /nobreak >nul
+echo      -> Orchestrator started in background.
+ping 127.0.0.1 -n 3 >nul
 
 :: 4. Start Frontend (Vite)
 echo.
 echo [4/4] Starting Web Frontend (Vite on port %WEB_PORT%)...
-start "Doblador - Frontend" /D "%~dp0frontend" cmd /k "title Doblador - Frontend && color 0E && npm run dev -- --port %WEB_PORT%"
-echo      -^> Frontend started in background.
-timeout /t 2 /nobreak >nul
+start "Doblador - Frontend" /D "%~dp0frontend" cmd /k "title Doblador - Frontend && color 0E && npm.cmd run dev -- --port %WEB_PORT%"
+echo      -> Frontend started in background.
+ping 127.0.0.1 -n 3 >nul
 
 echo.
 echo ========================================================
@@ -99,4 +99,6 @@ echo ========================================================
 echo.
 echo To shut down all services cleanly, run 'stop_system.bat'.
 echo.
+if "%1"=="--no-pause" goto done
 pause
+:done
