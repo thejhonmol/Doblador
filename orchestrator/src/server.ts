@@ -133,6 +133,8 @@ app.get('/api/jobs/:id', async (req, res) => {
         // previously written by nobody.
         let speakers = [];
         let segmentCount = 0;
+        let emotionsSummary: Record<string, number> = {};
+        let segmentsList = [];
         try {
             const speakersRes = await query(
                 'SELECT speaker_label, fish_reference_id, target_lang FROM speakers WHERE job_id = $1 ORDER BY speaker_label',
@@ -141,6 +143,27 @@ app.get('/api/jobs/:id', async (req, res) => {
             speakers = speakersRes.rows;
             const segRes = await query('SELECT count(*)::int AS n FROM segments WHERE job_id = $1', [jobId]);
             segmentCount = segRes.rows[0].n;
+
+            const emotionsRes = await query(
+                `SELECT emotion, count(*)::int AS count
+                 FROM segments
+                 WHERE job_id = $1 AND emotion IS NOT NULL
+                 GROUP BY emotion
+                 ORDER BY count DESC`,
+                [jobId]
+            );
+            for (const r of emotionsRes.rows) {
+                emotionsSummary[r.emotion] = r.count;
+            }
+
+            const detailedSegs = await query(
+                `SELECT speaker_label, start_ms, end_ms, source_text, translated_text, emotion, emotion_confidence
+                 FROM segments
+                 WHERE job_id = $1
+                 ORDER BY start_ms ASC LIMIT 100`,
+                [jobId]
+            );
+            segmentsList = detailedSegs.rows;
         } catch (dbErr: any) {
             console.warn(`[API] Could not read speakers/segments for job ${jobId}: ${dbErr.message}`);
         }
@@ -149,7 +172,9 @@ app.get('/api/jobs/:id', async (req, res) => {
             job: jobResult.rows[0],
             stages,
             speakers,
-            segmentCount
+            segmentCount,
+            emotionsSummary,
+            segments: segmentsList
         });
     } catch (error: any) {
         console.error('Error fetching job:', error);

@@ -31,6 +31,7 @@ interface SegmentPayload {
     text: string;
     duration_sec: number | null;
     speaker?: string;
+    emotion?: string;
 }
 
 /** True when a segment carries real speech, as opposed to a music tag or a blank. */
@@ -80,7 +81,7 @@ a text-to-speech (TTS) voice and for audio/video dubbing sync.
 
 You will receive:
 - "full_context": the complete original transcript, for context ONLY (do not translate it).
-- "segments": the subset of segments to translate now: { index, text, duration_sec, speaker? }.
+- "segments": the subset of segments to translate now: { index, text, duration_sec, speaker?, emotion? }.
 Use "full_context" to resolve ambiguity, pronouns, topic and tone — never translate a
 segment in isolation from the story it belongs to.
 
@@ -93,11 +94,18 @@ CORE DUBBING PRINCIPLES (APPLY REGARDLESS OF TOPIC OR LANGUAGE PAIR):
    - Once you choose a translation for a recurring term or name, reuse it every time it
      reappears. Do not vary it for style.
 
-2. REGISTER & TONE CONSISTENCY
+2. REGISTER, TONE & EMOTION CONGRUENCE
    - Detect each speaker's formality (casual / neutral / formal) and tone from "full_context".
    - If "speaker" is provided, keep that speaker's formality consistent across all their
      segments (e.g. tú/usted, tu/vous, du/Sie) — don't switch mid-video unless the original
      speaker clearly does.
+   - If "emotion" is provided (e.g. "happy", "sad", "angry", "surprised", "fearful", "disgust", "neutral"
+     predicted by Speech Emotion Recognition Whisper-Large-v3), adapt vocabulary, cadence,
+     and punctuation in ${lang} to match that emotional state:
+     * "angry": punchy, direct phrasing, sharp exclamations.
+     * "happy" / "surprised": lively, enthusiastic rhythm and natural upbeat idioms.
+     * "sad" / "fearful": tender, somber, hesitating, or urgent/worried cadence.
+     * "neutral": balanced, clear conversational delivery.
 
 3. DO NOT TRANSLATE (DNT) & CULTURAL INTEGRITY
    - Keep brand names, trademarks, software/engine names, hardware models, product names,
@@ -230,6 +238,7 @@ export const translateWorker = new Worker(
                 // (keep one speaker's register consistent across their segments) was
                 // silently unenforced.
                 speaker: s.speaker_label ?? s.speaker,
+                emotion: s.emotion,
             }));
 
             const prompt = `

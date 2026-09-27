@@ -47,8 +47,9 @@ export async function persistSegments(jobId: string, segments: any[]): Promise<v
         const label = seg.speaker_label || 'SPEAKER_00';
         await query(
             `INSERT INTO segments (job_id, speaker_label, start_ms, end_ms, source_text,
-                                   translated_text, tts_audio_url, generated_ms, speed_used)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+                                   translated_text, tts_audio_url, generated_ms, speed_used,
+                                   emotion, emotion_confidence)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
             [
                 jobId,
                 label,
@@ -59,6 +60,8 @@ export async function persistSegments(jobId: string, segments: any[]): Promise<v
                 seg.tts_audio_url ?? null,
                 seg.generated_ms ?? null,
                 seg.speed_used ?? 1.0,
+                seg.emotion ?? null,
+                seg.emotion_confidence ?? null,
             ]
         );
     }

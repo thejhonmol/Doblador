@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS segments (
     translated_text TEXT,
     tts_audio_url TEXT,
     generated_ms INT,
-    speed_used NUMERIC(4, 2) DEFAULT 1.00
+    speed_used NUMERIC(4, 2) DEFAULT 1.00,
+    emotion VARCHAR(32),
+    emotion_confidence NUMERIC(4, 3)
 );
 
 CREATE INDEX IF NOT EXISTS idx_segments_job ON segments(job_id);

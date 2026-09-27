@@ -153,6 +153,27 @@ try:
 except Exception as e:
     print(f"Warning: Could not load Age/Gender model ({e}).")
 
+# Initialize Speech Emotion Recognition (SER) model (Whisper-Large-v3 fine-tuned for SER)
+print("Loading Speech Emotion Recognition model (Whisper-Large-v3 SER)...")
+from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
+
+emotion_model = None
+emotion_feature_extractor = None
+emotion_device = "cuda" if torch.cuda.is_available() else "cpu"
+emotion_dtype = torch.float16 if emotion_device == "cuda" else torch.float32
+
+try:
+    ser_repo = "firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3"
+    emotion_feature_extractor = AutoFeatureExtractor.from_pretrained(ser_repo)
+    emotion_model = AutoModelForAudioClassification.from_pretrained(
+        ser_repo,
+        dtype=emotion_dtype
+    ).to(emotion_device)
+    emotion_model.eval()
+    print(f"Speech Emotion Recognition model loaded successfully on {emotion_device} ({emotion_dtype})!")
+except Exception as e:
+    print(f"Warning: Could not load Speech Emotion Recognition model ({e}).")
+
 GENDER_LABELS = {0: "female", 1: "male", 2: "child"}
 
 
@@ -215,6 +236,85 @@ def _classify_speakers(audio_16k, segments):
 
     return metadata
 
+
+def _classify_emotions(audio_16k, segments):
+    """
+    Classifies the emotion of each audio segment using the Whisper-Large-v3 SER model
+    (firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3).
+    Labels: angry, disgust, fearful, happy, neutral, sad, surprised.
+    """
+    if emotion_model is None or emotion_feature_extractor is None or len(audio_16k) == 0:
+        for s in segments:
+            s.setdefault("emotion", "neutral")
+            s.setdefault("emotion_confidence", 0.5)
+        return segments
+
+    total_samples = len(audio_16k)
+    sr = 16000
+    max_chunk = 30 * sr  # Whisper max window is 30 seconds
+
+    for seg in segments:
+        try:
+            start_ms = seg.get("start_ms", 0) or 0
+            end_ms = seg.get("end_ms", 0) or 0
+            start_idx = max(0, int((start_ms / 1000.0) * sr))
+            end_idx = min(total_samples, int((end_ms / 1000.0) * sr))
+
+            if end_idx <= start_idx:
+                seg["emotion"] = "neutral"
+                seg["emotion_confidence"] = 0.5
+                continue
+
+            slice_audio = audio_16k[start_idx:end_idx]
+            # Minimum audio length for meaningful classification: 0.25 seconds
+            if len(slice_audio) < int(sr * 0.25):
+                seg["emotion"] = "neutral"
+                seg["emotion_confidence"] = 0.5
+                continue
+
+            if len(slice_audio) > max_chunk:
+                slice_audio = slice_audio[:max_chunk]
+
+            inputs = emotion_feature_extractor(slice_audio, sampling_rate=sr, return_tensors="pt")
+            input_features = inputs.input_features.to(emotion_device, dtype=emotion_dtype)
+
+            with torch.no_grad():
+                outputs = emotion_model(input_features)
+                probs = torch.softmax(outputs.logits, dim=-1)
+                pred_idx = torch.argmax(probs, dim=-1).item()
+                confidence = float(probs[0][pred_idx].item())
+                label = emotion_model.config.id2label.get(pred_idx, "neutral")
+
+            seg["emotion"] = label
+            seg["emotion_confidence"] = round(confidence, 3)
+        except Exception as e:
+            print(f"[SER] Emotion classification error for segment {seg.get('start_ms')}-{seg.get('end_ms')}: {e}")
+            seg["emotion"] = "neutral"
+            seg["emotion_confidence"] = 0.5
+
+    return segments
+
+
+def _aggregate_speaker_emotions(segments, speakers_metadata):
+    """
+    Computes primary emotion and emotion distribution per speaker.
+    """
+    from collections import Counter
+    speaker_emotions = {}
+    for seg in segments:
+        spk = seg.get("speaker_label", "SPEAKER_00")
+        em = seg.get("emotion", "neutral")
+        if spk not in speaker_emotions:
+            speaker_emotions[spk] = Counter()
+        speaker_emotions[spk][em] += 1
+
+    for spk, counter in speaker_emotions.items():
+        if spk in speakers_metadata:
+            most_common = counter.most_common(1)
+            speakers_metadata[spk]["primary_emotion"] = most_common[0][0] if most_common else "neutral"
+            speakers_metadata[spk]["emotion_distribution"] = dict(counter)
+
+
 DEFAULT_ENGINE = os.environ.get("TRANSCRIBE_ENGINE", "moss")
 
 
@@ -260,6 +360,8 @@ def health_check():
         "moss_enabled": moss_model is not None,
         "diarization_enabled": diar_model is not None,
         "age_gender_enabled": age_gender_model is not None,
+        "emotion_recognition_enabled": emotion_model is not None,
+        "emotion_device": str(emotion_device) if emotion_model is not None else None,
         "whisper_device": getattr(whisper_model, "device", "unknown")
     }
 
@@ -835,10 +937,13 @@ async def transcribe_audio(
                 unique_speakers = sorted(list({s["speaker_label"] for s in final_segments}))
                 print(f"MOSS complete: {len(final_segments)} segments, speakers: {unique_speakers}")
 
+                audio_for_profiling = profiling_audio if profiling_audio is not None else audio_data
                 speakers_metadata = _classify_speakers(
-                    profiling_audio if profiling_audio is not None else audio_data,
+                    audio_for_profiling,
                     final_segments,
                 )
+                _classify_emotions(audio_for_profiling, final_segments)
+                _aggregate_speaker_emotions(final_segments, speakers_metadata)
                 for seg in final_segments:
                     meta = speakers_metadata.get(seg["speaker_label"], {})
                     seg["speaker_gender"] = meta.get("gender")
@@ -896,10 +1001,13 @@ async def transcribe_audio(
             final_segments = raw_segments
 
         unique_speakers = sorted(list({s["speaker_label"] for s in final_segments}))
+        audio_for_profiling = profiling_audio if profiling_audio is not None else audio_data
         speakers_metadata = _classify_speakers(
-            profiling_audio if profiling_audio is not None else audio_data,
+            audio_for_profiling,
             final_segments,
         )
+        _classify_emotions(audio_for_profiling, final_segments)
+        _aggregate_speaker_emotions(final_segments, speakers_metadata)
         for seg in final_segments:
             meta = speakers_metadata.get(seg["speaker_label"], {})
             seg["speaker_gender"] = meta.get("gender")
@@ -925,6 +1033,34 @@ async def transcribe_audio(
         # rmtree, not rmdir: any leftover file made rmdir fail and the whole temp
         # directory was silently left behind.
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+@app.post("/classify-emotions")
+async def classify_emotions_endpoint(
+    audio_path: str = Form(...),
+    segments_json: str = Form(...)
+):
+    """
+    Standalone endpoint to classify emotions on arbitrary segments using Whisper-Large-v3 SER.
+    `audio_path` must be an absolute path to audio (e.g. isolated vocals).
+    `segments_json` is a JSON array of segment dicts with start_ms and end_ms.
+    """
+    resolved_path = safe_path(audio_path, must_exist=True)
+    audio_data, sr = sf.read(resolved_path)
+    if len(audio_data.shape) > 1:
+        audio_data = audio_data.mean(axis=1)
+    if sr != 16000:
+        divisor = math.gcd(int(sr), 16000)
+        audio_data = scipy.signal.resample_poly(audio_data, 16000 // divisor, sr // divisor)
+    audio_data = audio_data.astype(np.float32)
+
+    try:
+        segments = json.loads(segments_json)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid segments_json: {e}")
+
+    classified = _classify_emotions(audio_data, segments)
+    return {"segments": classified}
 
 
 if __name__ == "__main__":

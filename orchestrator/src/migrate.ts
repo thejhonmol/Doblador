@@ -50,8 +50,12 @@ const SCHEMA_STATEMENTS: string[] = [
         translated_text TEXT,
         tts_audio_url TEXT,
         generated_ms INT,
-        speed_used NUMERIC(4, 2) DEFAULT 1.00
+        speed_used NUMERIC(4, 2) DEFAULT 1.00,
+        emotion VARCHAR(32),
+        emotion_confidence NUMERIC(4, 3)
     )`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS emotion VARCHAR(32)`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS emotion_confidence NUMERIC(4, 3)`,
 
     `CREATE TABLE IF NOT EXISTS voices_catalog (
         fish_reference_id VARCHAR(64) PRIMARY KEY,

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Upload, FileVideo, Loader2, CheckCircle2, Mic, TextSelect, FileAudio, Film } from 'lucide-react';
+import { Upload, FileVideo, Loader2, CheckCircle2, Mic, TextSelect, FileAudio, Film, Smile, ChevronDown, ChevronUp } from 'lucide-react';
 import './index.css';
 
 const API_URL = 'http://localhost:3000/api';
@@ -29,6 +29,33 @@ interface Speaker {
   target_lang: string;
 }
 
+interface SegmentItem {
+  speaker_label: string;
+  start_ms: number;
+  end_ms: number;
+  source_text: string;
+  translated_text?: string;
+  emotion?: string;
+  emotion_confidence?: number;
+}
+
+const EMOTION_MAP: Record<string, { label: string; emoji: string; color: string; bg: string }> = {
+  happy: { label: 'Happy', emoji: '😊', color: '#4ade80', bg: 'rgba(34, 197, 94, 0.15)' },
+  sad: { label: 'Sad', emoji: '😢', color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.15)' },
+  angry: { label: 'Angry', emoji: '😠', color: '#f87171', bg: 'rgba(239, 68, 68, 0.15)' },
+  surprised: { label: 'Surprised', emoji: '😲', color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.15)' },
+  fearful: { label: 'Fearful', emoji: '😨', color: '#c084fc', bg: 'rgba(168, 85, 247, 0.15)' },
+  disgust: { label: 'Disgust', emoji: '🤢', color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.15)' },
+  neutral: { label: 'Neutral', emoji: '😐', color: '#94a3b8', bg: 'rgba(100, 116, 139, 0.15)' },
+};
+
+function formatTimeMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const mins = Math.floor(totalSec / 60);
+  const secs = totalSec % 60;
+  return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [lang, setLang] = useState('Spanish');
@@ -40,6 +67,9 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [segmentCount, setSegmentCount] = useState(0);
+  const [emotionsSummary, setEmotionsSummary] = useState<Record<string, number>>({});
+  const [segments, setSegments] = useState<SegmentItem[]>([]);
+  const [showTimeline, setShowTimeline] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -69,6 +99,9 @@ function App() {
     setJobId(null);
     setJob(null);
     setStages([]);
+    setEmotionsSummary({});
+    setSegments([]);
+    setShowTimeline(false);
 
     const formData = new FormData();
     formData.append('video', file);
@@ -88,6 +121,8 @@ function App() {
         setStages(jobRes.data.stages || []);
         setSpeakers(jobRes.data.speakers || []);
         setSegmentCount(jobRes.data.segmentCount || 0);
+        setEmotionsSummary(jobRes.data.emotionsSummary || {});
+        setSegments(jobRes.data.segments || []);
       } catch (_) {}
     } catch (err: any) {
       setError(err.response?.data?.error || err.message || 'Upload failed');
@@ -106,6 +141,8 @@ function App() {
         setStages(res.data.stages || []);
         setSpeakers(res.data.speakers || []);
         setSegmentCount(res.data.segmentCount || 0);
+        setEmotionsSummary(res.data.emotionsSummary || {});
+        setSegments(res.data.segments || []);
 
         if (res.data.job.status === 'completed' || res.data.job.status === 'failed') {
           clearInterval(interval);
@@ -258,6 +295,91 @@ function App() {
               })}
             </div>
             
+            {Object.keys(emotionsSummary).length > 0 && (
+              <div className="emotions-panel">
+                <div className="emotions-panel-title">
+                  <Smile size={16} style={{ color: 'var(--accent-color)' }} />
+                  <span>Speech Emotion Recognition (Whisper-Large-v3)</span>
+                </div>
+                <div className="emotions-chips">
+                  {Object.entries(emotionsSummary).map(([emotion, count]) => {
+                    const cfg = EMOTION_MAP[emotion] || { label: emotion, emoji: '🎙️', color: '#94a3b8', bg: 'rgba(255,255,255,0.05)' };
+                    return (
+                      <span
+                        key={emotion}
+                        className="emotion-badge"
+                        style={{ color: cfg.color, backgroundColor: cfg.bg, borderColor: cfg.color }}
+                      >
+                        <span>{cfg.emoji}</span>
+                        <span>{cfg.label}: {count}</span>
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {segments.length > 0 && (
+              <div style={{ marginTop: '1rem' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowTimeline(!showTimeline)}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--text-secondary)',
+                    cursor: 'pointer',
+                    fontSize: '0.8rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '0.4rem',
+                    padding: 0
+                  }}
+                >
+                  {showTimeline ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+                  <span>{showTimeline ? 'Hide' : 'Show'} Dialogue & Emotion Timeline ({segments.length} segments)</span>
+                </button>
+
+                {showTimeline && (
+                  <div className="segments-timeline">
+                    {segments.map((seg, idx) => {
+                      const emo = seg.emotion || 'neutral';
+                      const cfg = EMOTION_MAP[emo] || { label: emo, emoji: '🎙️', color: '#94a3b8', bg: 'rgba(255,255,255,0.05)' };
+                      return (
+                        <div key={idx} className="segment-card">
+                          <div className="segment-header">
+                            <span className="segment-speaker">{seg.speaker_label}</span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                              <span
+                                className="emotion-badge"
+                                style={{
+                                  fontSize: '0.65rem',
+                                  padding: '0.1rem 0.4rem',
+                                  color: cfg.color,
+                                  backgroundColor: cfg.bg,
+                                  borderColor: cfg.color
+                                }}
+                              >
+                                {cfg.emoji} {cfg.label}
+                                {seg.emotion_confidence ? ` ${(seg.emotion_confidence * 100).toFixed(0)}%` : ''}
+                              </span>
+                              <span className="segment-time">
+                                {formatTimeMs(seg.start_ms)} - {formatTimeMs(seg.end_ms)}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="segment-text">{seg.source_text}</div>
+                          {seg.translated_text && (
+                            <div className="segment-subtext">↳ {seg.translated_text}</div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
             {job.status === 'completed' && segmentCount > 0 && (
               <div style={{ marginTop: '1.5rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                 <p style={{ marginBottom: '0.5rem' }}>{segmentCount} segments dubbed.</p>
@@ -295,6 +417,9 @@ function App() {
                 setFile(null);
                 setSpeakers([]);
                 setSegmentCount(0);
+                setEmotionsSummary({});
+                setSegments([]);
+                setShowTimeline(false);
               }}>
                 Dub Another Video
               </button>

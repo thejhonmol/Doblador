@@ -62,6 +62,7 @@ flowchart TD
 | **MOSS-Transcribe-Diarize** | Single-pass STT + Speaker Diarization | Audio-LLM (0.9B) | `Q5_K_M.gguf` (~667 MB) | GPU (Vulkan / GGML) |
 | **Sortformer v2.1** | Multi-speaker diarization for up to 4 speakers (fallback) | Streaming Diarization Transformer | `Q8_0.gguf` (~17 MB) | GPU (Vulkan / GGML) |
 | **faster-whisper (base)** | Multilingual automatic speech recognition (fallback) | Encoder-Decoder Transformer | `float16` / `int8` (~140 MB) | GPU (CUDA) / CPU |
+| **Whisper-Large-v3 SER** | Speech Emotion Recognition (7 emotions: angry, disgust, fearful, happy, neutral, sad, surprised) | Whisper-Large-v3 fine-tuned audio classification (`firdhokk`) | `float16` PyTorch (~1.2 GB) | GPU (CUDA) / CPU |
 | **Wav2Vec2 Age & Gender** | Gender (M/F/Child) and biological age classification | `wav2vec2-large-robust` (audEERING) | FP32 PyTorch (~1.2 GB) | CPU / GPU |
 | **Demucs (htdemucs)** | Deep source separation (isolates vocals, preserves music/SFX) | Hybrid Spectrogram Waveform U-Net | FP32 PyTorch (~80 MB) | GPU (CUDA) / CPU |
 | **Google Gemini Flash** | Context-aware translation & script adaptation | Multimodal Cloud LLM | `gemini-3.7-flash` (fallback to 3.5, 3.8, 3.1) | Cloud API |
@@ -81,13 +82,19 @@ Places each synthesized TTS segment at its **original timestamp**, solving voice
 - **Layer 4 (Forward-Only Progressive Drift Recovery)**: Drift is never recovered by snapping timestamps backward onto already playing audio. Instead, it recovers forward by proportionally accelerating subsequent clips (up to 1.35x `atempo`) to absorb delay in natural dialogue pauses.
 - **Additive Bus with Soft-Knee Limiter**: Segments are summed onto the bus (`+=`). Peaks exceeding the knee (0.80) are smoothly compressed via `tanh` up to 0.98, leaving the rest of the audio bit-identical.
 
-### 2. Multi-Key Parallel Voice Synthesis with Failover (Fish Audio)
+### 2. Speech Emotion Recognition & Expressive Translation (Whisper-Large-v3 SER)
+- Integrates [`firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3`](https://huggingface.co/firdhokk/speech-emotion-recognition-with-openai-whisper-large-v3) running in `float16` on CUDA.
+- Analyzes isolated vocal segments to detect emotional delivery across 7 classes: `angry`, `disgust`, `fearful`, `happy`, `neutral`, `sad`, `surprised`.
+- Injects detected emotion tags directly into the Gemini prompt payload, guiding the translation engine to adapt cadence, rhythm, vocabulary, and punctuation (e.g. sharp exclamations for anger, vibrant colloquialisms for happiness, tender cadence for sadness).
+- Persists emotion and confidence metrics to PostgreSQL and surfaces an interactive dialogue emotion timeline in the web UI.
+
+### 3. Multi-Key Parallel Voice Synthesis with Failover (Fish Audio)
 - Supports multiple API keys via `FISH_AUDIO_API_KEY`, `FISH_AUDIO_API_KEY_2`, and `FISH_AUDIO_API_KEY_3`, or comma-separated lists.
 - Dispatches across **6 parallel synthesis slots** with automatic exponential backoff (2s → 30s) and jitter to handle rate limits (HTTP 429).
 - Automatically rotates keys upon non-retryable errors.
 - Guards against truncated or empty responses, ensuring zero dropped audio segments.
 
-### 3. Acoustic Demographic Voice Allocation
+### 4. Acoustic Demographic Voice Allocation
 - Analyzes each diarized speaker using `Wav2Vec2` directly on Demucs-isolated vocal stems (avoiding music/noise interference).
 - Automatically assigns distinct voices from pre-configured demographic pools:
   - `male_young` (men < 45 years)
@@ -97,11 +104,11 @@ Places each synthesized TTS segment at its **original timestamp**, solving voice
   - `child` (children < 14 years)
 - Records assignments in the `speakers` table for auditability and UI inspection.
 
-### 4. Perceptual Loudness Calibration (LUFS)
+### 5. Perceptual Loudness Calibration (LUFS)
 - Measures integrated LUFS of the original vocal track for each speaker using ITU-R BS.1770-4.
 - Individually gains each generated TTS clip so that dubbed dialogue matches the exact perceptual loudness of the original actor.
 
-### 5. Script Translation with Cultural Preservation & Text Expansion
+### 6. Script Translation with Cultural Preservation & Text Expansion
 - **Do Not Translate (DNT)**: Brand names, software engines ("Unreal Engine"), hardware models, usernames, and proper nouns remain unchanged.
 - **Full Textual Expansion**: Numbers, dates, percentages, and currencies are expanded into written words ("twenty-five percent", "three thousand one hundred") to prevent TTS engines from mispronouncing abbreviations or series of numbers.
 - **Resilient Fallback Chain**: Automatically degrades through `gemini-3.7-flash` ➔ `gemini-3.5-flash` ➔ `gemini-3.8-flash` ➔ `gemini-3.1-flash-lite` ➔ `gemini-flash-latest`.
