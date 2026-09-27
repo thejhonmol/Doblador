@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- Last known payload for each job (output of the latest completed stage).
 -- Essential to allow pipeline recovery on orchestrator restarts.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload JSONB;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone';
 
 -- Granular stage tracking
 CREATE TABLE IF NOT EXISTS job_stages (
@@ -31,6 +32,7 @@ CREATE TABLE IF NOT EXISTS speakers (
     speaker_label VARCHAR(32) NOT NULL, -- 'SPEAKER_00', 'SPEAKER_01'
     fish_reference_id VARCHAR(64) NOT NULL,
     target_lang VARCHAR(10) NOT NULL,
+    voice_mode VARCHAR(32) DEFAULT 'clone',
     UNIQUE(job_id, speaker_label)
 );
 

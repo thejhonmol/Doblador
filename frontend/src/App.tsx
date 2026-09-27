@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Upload, FileVideo, Loader2, CheckCircle2, Mic, TextSelect, FileAudio, Film, Smile, ChevronDown, ChevronUp } from 'lucide-react';
+import { Upload, FileVideo, Loader2, CheckCircle2, Mic, TextSelect, FileAudio, Film, Smile, ChevronDown, ChevronUp, Sparkles, Users } from 'lucide-react';
 import './index.css';
 
 const API_URL = 'http://localhost:3000/api';
@@ -21,12 +21,14 @@ interface Job {
   id: string;
   status: JobStatus;
   target_lang: string;
+  voice_mode?: string;
 }
 
 interface Speaker {
   speaker_label: string;
   fish_reference_id: string;
   target_lang: string;
+  voice_mode?: string;
 }
 
 interface SegmentItem {
@@ -59,6 +61,7 @@ function formatTimeMs(ms: number): string {
 function App() {
   const [file, setFile] = useState<File | null>(null);
   const [lang, setLang] = useState('Spanish');
+  const [voiceMode, setVoiceMode] = useState<'clone' | 'preset'>('clone');
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -106,6 +109,7 @@ function App() {
     const formData = new FormData();
     formData.append('video', file);
     formData.append('targetLang', lang);
+    formData.append('voiceMode', voiceMode);
 
     try {
       const res = await axios.post(`${API_URL}/upload`, formData, {
@@ -234,6 +238,47 @@ function App() {
               </select>
             </div>
 
+            <div className="form-group">
+              <label>Voice Generation Mode</label>
+              <div className="voice-mode-cards">
+                <div
+                  className={`voice-mode-card ${voiceMode === 'clone' ? 'active' : ''}`}
+                  onClick={() => setVoiceMode('clone')}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="voice-mode-header">
+                    <div className="voice-mode-icon-title">
+                      <Sparkles size={18} className="voice-mode-icon" />
+                      <strong>Clone Actor Voices</strong>
+                    </div>
+                    <span className="badge-recommend">Zero-Shot AI</span>
+                  </div>
+                  <p className="voice-mode-desc">
+                    Extracts each actor's unique vocal timbre from Demucs isolated vocals and clones it in real-time.
+                  </p>
+                </div>
+
+                <div
+                  className={`voice-mode-card ${voiceMode === 'preset' ? 'active' : ''}`}
+                  onClick={() => setVoiceMode('preset')}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <div className="voice-mode-header">
+                    <div className="voice-mode-icon-title">
+                      <Users size={18} className="voice-mode-icon" />
+                      <strong>Preset Voice Catalog</strong>
+                    </div>
+                    <span className="badge-standard">Studio Pool</span>
+                  </div>
+                  <p className="voice-mode-desc">
+                    Selects curated demographic studio voices matched to detected age and gender pools.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <button 
               className="btn-primary" 
               onClick={handleUpload} 
@@ -261,7 +306,12 @@ function App() {
         {job && (
           <div className="job-status">
             <div className="status-header">
-              <h3>Job Tracking</h3>
+              <div>
+                <h3>Job Tracking</h3>
+                <span className="job-meta-tag">
+                  Target: <strong>{job.target_lang}</strong> • Mode: <strong>{job.voice_mode === 'preset' ? '🎙️ Preset Voice Catalog' : '🎭 Actor Voice Cloning'}</strong>
+                </span>
+              </div>
               <span className={`status-badge status-${job.status}`}>
                 {job.status}
               </span>
@@ -381,16 +431,34 @@ function App() {
             )}
 
             {job.status === 'completed' && segmentCount > 0 && (
-              <div style={{ marginTop: '1.5rem', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                <p style={{ marginBottom: '0.5rem' }}>{segmentCount} segments dubbed.</p>
+              <div className="speakers-summary-box">
+                <div className="speakers-summary-header">
+                  <span>Dubbing Summary ({segmentCount} segments)</span>
+                  <span className="speakers-badge">
+                    {job.voice_mode === 'preset' ? '🎙️ Preset Voices' : '✨ Zero-Shot Cloned'}
+                  </span>
+                </div>
                 {speakers.length > 0 && (
-                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                    {speakers.map(s => (
-                      <li key={s.speaker_label}>
-                        {s.speaker_label} → <code>{s.fish_reference_id.slice(0, 12)}…</code>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="speakers-grid">
+                    {speakers.map(s => {
+                      const isCloned = s.fish_reference_id === 'cloned_inline' || s.voice_mode === 'clone';
+                      return (
+                        <div key={s.speaker_label} className="speaker-pill">
+                          <span className="speaker-label">{s.speaker_label}</span>
+                          <span className="speaker-arrow">→</span>
+                          {isCloned ? (
+                            <span className="speaker-clone-tag">
+                              <Sparkles size={13} /> Cloned Actor Vocals
+                            </span>
+                          ) : (
+                            <span className="speaker-preset-tag">
+                              Voice: <code>{s.fish_reference_id.slice(0, 10)}…</code>
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 )}
               </div>
             )}

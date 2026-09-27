@@ -6,6 +6,8 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import FormData from 'form-data';
+import ffmpeg from 'fluent-ffmpeg';
+import { encode } from '@msgpack/msgpack';
 
 // Default reference voice — change this to match your preferred voice from Fish Audio catalog
 const DEFAULT_REFERENCE_ID = '7033e0e6d35e404d81a100701ceca41b';
@@ -137,29 +139,177 @@ class HttpError extends Error {
     }
 }
 
-async function generateSpeech(text: string, referenceId: string, outputPath: string, apiKey: string): Promise<void> {
+interface VoiceTarget {
+    mode: 'clone' | 'preset';
+    referenceId?: string;
+    referenceAudio?: Buffer;
+    referenceText?: string;
+}
+
+interface SpeakerCloneRef {
+    audio: Buffer;
+    text: string;
+    durationSec: number;
+}
+
+/**
+ * Extracts a clean speech slice of a speaker from the isolated vocals track
+ * to use as an in-flight reference for zero-shot cloning in Fish Audio.
+ */
+async function extractSpeakerReference(
+    vocalsPath: string,
+    startMs: number,
+    endMs: number,
+    outPath: string
+): Promise<Buffer | null> {
+    const startSec = (startMs / 1000).toFixed(3);
+    const durSec = Math.max(0.5, (endMs - startMs) / 1000).toFixed(3);
+
+    return new Promise((resolve) => {
+        ffmpeg(vocalsPath)
+            .setStartTime(startSec)
+            .setDuration(durSec)
+            .audioFrequency(44100)
+            .audioChannels(1)
+            .audioBitrate('128k')
+            .format('mp3')
+            .on('end', () => {
+                try {
+                    if (fs.existsSync(outPath) && fs.statSync(outPath).size > 1000) {
+                        resolve(fs.readFileSync(outPath));
+                    } else {
+                        resolve(null);
+                    }
+                } catch {
+                    resolve(null);
+                }
+            })
+            .on('error', (err) => {
+                console.warn(`[TTS Clone] Failed extracting reference audio: ${err.message}`);
+                resolve(null);
+            })
+            .save(outPath);
+    });
+}
+
+/**
+ * Finds the cleanest and most representative speech segment (between 3.5s and 10s)
+ * for each speaker in the video and extracts its audio slice for inline cloning.
+ */
+async function prepareSpeakerCloneReferences(
+    uniqueSpeakers: string[],
+    segments: any[],
+    vocalsAudioPath: string | null,
+    tempDir: string
+): Promise<Record<string, SpeakerCloneRef>> {
+    const cloneRefs: Record<string, SpeakerCloneRef> = {};
+    if (!vocalsAudioPath || !fs.existsSync(vocalsAudioPath)) {
+        console.warn('[TTS Clone] Vocals audio path not available. Inline cloning will fallback to catalog voices.');
+        return cloneRefs;
+    }
+
+    for (const spk of uniqueSpeakers) {
+        const spkSegs = segments.filter(
+            (s) => (s.speaker_label || 'SPEAKER_00') === spk &&
+                   typeof s.text === 'string' &&
+                   s.text.trim().length >= 8 &&
+                   s.end_ms > s.start_ms
+        );
+
+        if (spkSegs.length === 0) continue;
+
+        // Prefer segments between 3.5s and 10s (optimal for zero-shot prompt conditioning)
+        let bestSeg = spkSegs.find((s) => {
+            const dur = (s.end_ms - s.start_ms) / 1000;
+            return dur >= 3.5 && dur <= 10.0;
+        });
+
+        // Otherwise pick the longest available segment >= 1.5s
+        if (!bestSeg) {
+            const sortedByDur = [...spkSegs].sort(
+                (a, b) => (b.end_ms - b.start_ms) - (a.end_ms - a.start_ms)
+            );
+            if (sortedByDur.length > 0 && (sortedByDur[0].end_ms - sortedByDur[0].start_ms) >= 1500) {
+                bestSeg = sortedByDur[0];
+            }
+        }
+
+        if (!bestSeg) {
+            console.warn(`[TTS Clone] Speaker ${spk} has no segments >= 1.5s. Will fallback to preset catalog voice.`);
+            continue;
+        }
+
+        const outRefPath = path.join(tempDir, `ref_${spk}.mp3`);
+        const audioBuf = await extractSpeakerReference(
+            vocalsAudioPath,
+            bestSeg.start_ms,
+            bestSeg.end_ms,
+            outRefPath
+        );
+
+        if (audioBuf && audioBuf.length > 1000) {
+            const dur = ((bestSeg.end_ms - bestSeg.start_ms) / 1000).toFixed(1);
+            console.log(`[TTS Clone] Extracted reference audio for ${spk} (${dur}s, ${audioBuf.length} bytes, text: "${bestSeg.text.slice(0, 50)}...")`);
+            cloneRefs[spk] = {
+                audio: audioBuf,
+                text: bestSeg.text,
+                durationSec: Number(dur),
+            };
+        }
+    }
+
+    return cloneRefs;
+}
+
+async function generateSpeech(
+    text: string,
+    target: VoiceTarget,
+    outputPath: string,
+    apiKey: string
+): Promise<void> {
     let response;
     try {
-        response = await axios.post('https://api.fish.audio/v1/tts', {
-            text,
-            reference_id: referenceId,
-            format: 'mp3',
-        }, {
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'model': 's2.1-pro-free',
-            },
-            responseType: 'arraybuffer',
-            timeout: 60000,
-        });
+        if (target.mode === 'clone' && target.referenceAudio && target.referenceAudio.length > 0) {
+            const payload = {
+                text,
+                model: 's2.1-pro-free',
+                format: 'mp3',
+                references: [
+                    {
+                        audio: target.referenceAudio,
+                        text: target.referenceText || '',
+                    }
+                ]
+            };
+            const packed = Buffer.from(encode(payload));
+            response = await axios.post('https://api.fish.audio/v1/tts', packed, {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/msgpack',
+                },
+                responseType: 'arraybuffer',
+                timeout: 60000,
+            });
+        } else {
+            response = await axios.post('https://api.fish.audio/v1/tts', {
+                text,
+                reference_id: target.referenceId || DEFAULT_REFERENCE_ID,
+                format: 'mp3',
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                    'model': 's2.1-pro-free',
+                },
+                responseType: 'arraybuffer',
+                timeout: 60000,
+            });
+        }
     } catch (err: any) {
         throw new HttpError(err.response?.data?.detail || err.message, err.response?.status);
     }
 
     const body = Buffer.from(response.data);
-    // A 200 with an empty or near-empty body is a silent failure: the file would be
-    // written and treated as a success, leaving a hole in the dubbed track.
     if (body.length < 512) {
         throw new HttpError(`Empty audio payload (${body.length} bytes)`, 200);
     }
@@ -168,26 +318,20 @@ async function generateSpeech(text: string, referenceId: string, outputPath: str
 
 /**
  * Tries every configured key, in rotation, with exponential backoff.
- *
- * The previous failover loop did `if (k === workerSlot % keys.length) continue`,
- * which skipped every key when only one was configured — i.e. the most common setup
- * had literally zero retries. It also had no backoff, so a 429 storm was hammered
- * immediately and every key failed together.
  */
 async function generateWithFailover(
     text: string,
-    referenceId: string,
+    target: VoiceTarget,
     outputPath: string,
     activeKeys: string[],
     startSlot: number,
     segLabel: string
 ): Promise<boolean> {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_SEGMENT; attempt++) {
-        // Rotate the starting key so load spreads across all of them.
         const keyIndex = (startSlot + attempt - 1) % activeKeys.length;
         const key = activeKeys[keyIndex];
         try {
-            await generateSpeech(text, referenceId, outputPath, key);
+            await generateSpeech(text, target, outputPath, key);
             return true;
         } catch (err: any) {
             const status = err instanceof HttpError ? err.status : undefined;
@@ -199,7 +343,6 @@ async function generateWithFailover(
                 (retryable ? '' : ' (not retryable, moving to the next key)')
             );
             if (lastAttempt || !retryable) break;
-            // Jitter so parallel slots do not retry in lockstep.
             const backoff = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1));
             await new Promise((r) => setTimeout(r, backoff + Math.floor(Math.random() * 500)));
         }
@@ -208,8 +351,9 @@ async function generateWithFailover(
 }
 
 export const ttsWorker = new Worker('tts', async (job: Job) => {
-    const { segments, jobId, videoPath, speakersMetadata } = job.data;
-    console.log(`[TTS] Generating audio for ${segments.length} segments for job ${jobId}`);
+    const { segments, jobId, videoPath, vocalsAudioPath, speakersMetadata, targetLang, voiceMode } = job.data;
+    const mode = voiceMode === 'preset' ? 'preset' : 'clone';
+    console.log(`[TTS] Generating audio for ${segments.length} segments for job ${jobId} (voiceMode: ${mode})`);
 
     const activeKeys = FISH_AUDIO_API_KEYS.length > 0 ? FISH_AUDIO_API_KEYS : (FISH_AUDIO_API_KEY ? [FISH_AUDIO_API_KEY] : []);
     if (activeKeys.length === 0) {
@@ -223,6 +367,35 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     const uniqueSpeakers: string[] = Array.from(new Set(segments.map((s: any) => s.speaker_label || 'SPEAKER_00')));
     console.log(`[TTS] Unique speakers detected in job ${jobId}: ${uniqueSpeakers.join(', ')}`);
     const speakerVoiceMap = allocateSpeakerVoices(uniqueSpeakers, speakersMetadata);
+
+    let speakerCloneRefs: Record<string, SpeakerCloneRef> = {};
+    if (mode === 'clone') {
+        speakerCloneRefs = await prepareSpeakerCloneReferences(uniqueSpeakers, segments, vocalsAudioPath, outputDir);
+    }
+
+    // Build VoiceTarget for each speaker
+    const speakerTargetMap: Record<string, VoiceTarget> = {};
+    const recordedSpeakerVoiceMap: Record<string, string> = {};
+
+    for (const label of uniqueSpeakers) {
+        if (mode === 'clone' && speakerCloneRefs[label]) {
+            speakerTargetMap[label] = {
+                mode: 'clone',
+                referenceAudio: speakerCloneRefs[label].audio,
+                referenceText: speakerCloneRefs[label].text,
+            };
+            recordedSpeakerVoiceMap[label] = 'cloned_inline';
+            console.log(`[TTS] Speaker ${label} will be CLONED dynamically from original actor vocals.`);
+        } else {
+            const fallbackVoice = speakerVoiceMap[label] || DEFAULT_REFERENCE_ID;
+            speakerTargetMap[label] = {
+                mode: 'preset',
+                referenceId: fallbackVoice,
+            };
+            recordedSpeakerVoiceMap[label] = fallbackVoice;
+            console.log(`[TTS] Speaker ${label} will use catalog voice ${fallbackVoice}.`);
+        }
+    }
 
     // Keep the DB catalogue in sync with the pools this worker actually uses.
     await syncVoicesCatalog(VOICE_POOLS).catch((e: any) =>
@@ -243,17 +416,12 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
 
             const seg = segments[i];
             const label = seg.speaker_label || 'SPEAKER_00';
-            const referenceId = isValidVoiceId(seg.fish_reference_id)
-                ? seg.fish_reference_id
-                : (speakerVoiceMap[label] || DEFAULT_REFERENCE_ID);
+            const target = speakerTargetMap[label] || { mode: 'preset', referenceId: DEFAULT_REFERENCE_ID };
+            const referenceIdForSeg = target.mode === 'clone' ? 'cloned_inline' : (target.referenceId || DEFAULT_REFERENCE_ID);
             const rawDurationMs = seg.end_ms - seg.start_ms;
             const targetMs = Math.max(200, rawDurationMs || 500);
-            const segLabel = `Seg ${i + 1}/${segments.length}`;
+            const segLabel = `Seg ${i + 1}/${segments.length} (${target.mode === 'clone' ? 'cloned' : 'preset'})`;
 
-            // An empty translation means the batch lost it, or the model returned a
-            // blank for real speech. Falling back to `seg.text` dubbed the ORIGINAL
-            // language with a Spanish voice — audible, and it looked like a lip-sync
-            // problem rather than a data problem. Silence plus a loud log is honest.
             const translated = typeof seg.translated_text === 'string' ? seg.translated_text.trim() : '';
             if (!translated) {
                 console.error(
@@ -268,7 +436,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                     generated_ms: targetMs,
                     speed_used: 1.0,
                     tts_failed: true,
-                    fish_reference_id: referenceId,
+                    fish_reference_id: referenceIdForSeg,
                 };
                 silentSegments++;
                 continue;
@@ -278,7 +446,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
 
             const generated = await generateWithFailover(
                 translated,
-                referenceId,
+                target,
                 audioPath,
                 activeKeys,
                 workerSlot,
@@ -292,7 +460,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                     tts_audio_url: audioPath,
                     speed_used: 1.0,
                     tts_failed: false,
-                    fish_reference_id: referenceId,
+                    fish_reference_id: referenceIdForSeg,
                 };
             } else {
                 console.error(`[TTS] ${segLabel} failed on all ${activeKeys.length} key(s) after ${MAX_ATTEMPTS_PER_SEGMENT} attempts. Using silence.`);
@@ -303,7 +471,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                     tts_audio_url: fallbackPath,
                     speed_used: 1.0,
                     tts_failed: true,
-                    fish_reference_id: referenceId,
+                    fish_reference_id: referenceIdForSeg,
                 };
                 silentSegments++;
             }
@@ -326,7 +494,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     }
 
     // Persist the speaker->voice decision so it is auditable and reusable.
-    await persistSpeakers(jobId, speakerVoiceMap, job.data.targetLang || 'Spanish')
+    await persistSpeakers(jobId, recordedSpeakerVoiceMap, targetLang || 'Spanish', mode)
         .catch((e: any) => console.warn(`[TTS] Warning: could not persist speakers: ${e.message}`));
 
     // Match loudness to original vocals using pyloudnorm

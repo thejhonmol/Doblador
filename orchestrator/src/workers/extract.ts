@@ -40,8 +40,8 @@ export function probeDurationSec(filePath: string): Promise<number | null> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export const extractWorker = new Worker('extract', async (job: Job) => {
-    const { videoPath, jobId, targetLang } = job.data;
-    console.log(`[Extract] Starting extraction for job ${jobId}`);
+    const { videoPath, jobId, targetLang, voiceMode } = job.data;
+    console.log(`[Extract] Starting extraction for job ${jobId} (voiceMode: ${voiceMode || 'clone'})`);
 
     // Probed before anything else so it travels with job.data through every stage.
     const videoDurationSec = await probeDurationSec(videoPath);
@@ -208,6 +208,7 @@ export const extractWorker = new Worker('extract', async (job: Job) => {
         videoPath,
         videoDurationSec,
         targetLang: targetLang || 'Spanish',
+        voiceMode: voiceMode || 'clone',
         jobId
     };
 }, { connection: redisConnection });

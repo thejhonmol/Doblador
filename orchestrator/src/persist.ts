@@ -14,7 +14,8 @@ import { query } from './db';
 export async function persistSpeakers(
     jobId: string,
     speakerVoiceMap: Record<string, string>,
-    targetLang: string
+    targetLang: string,
+    voiceMode: string = 'clone'
 ): Promise<void> {
     if (!jobId) return;
     const entries = Object.entries(speakerVoiceMap);
@@ -22,12 +23,13 @@ export async function persistSpeakers(
 
     for (const [speakerLabel, referenceId] of entries) {
         await query(
-            `INSERT INTO speakers (job_id, speaker_label, fish_reference_id, target_lang)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO speakers (job_id, speaker_label, fish_reference_id, target_lang, voice_mode)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (job_id, speaker_label)
              DO UPDATE SET fish_reference_id = EXCLUDED.fish_reference_id,
-                           target_lang = EXCLUDED.target_lang`,
-            [jobId, speakerLabel, referenceId, targetLang]
+                           target_lang = EXCLUDED.target_lang,
+                           voice_mode = EXCLUDED.voice_mode`,
+            [jobId, speakerLabel, referenceId, targetLang, voiceMode]
         );
     }
 }

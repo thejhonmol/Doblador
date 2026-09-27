@@ -68,6 +68,7 @@ const upload = multer({
 app.post('/api/upload', upload.single('video'), async (req, res) => {
     try {
         const targetLang = req.body.targetLang;
+        const voiceMode = req.body.voiceMode === 'preset' ? 'preset' : 'clone';
         const file = req.file;
 
         if (!file || !targetLang) {
@@ -81,15 +82,15 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
 
         // 2. Insert into DB to get UUID and track state
         const insertResult = await query(
-            `INSERT INTO jobs (user_id, status, source_url, target_lang)
-             VALUES ($1, $2, $3, $4) RETURNING id`,
-            [dummyUserId, 'pending', videoPath, targetLang]
+            `INSERT INTO jobs (user_id, status, source_url, target_lang, voice_mode)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+            [dummyUserId, 'pending', videoPath, targetLang, voiceMode]
         );
 
         const jobId = insertResult.rows[0].id;
 
         // 3. Queue the initial job step
-        await startJob(videoPath, targetLang, jobId);
+        await startJob(videoPath, targetLang, jobId, voiceMode);
 
         res.status(202).json({
             message: 'Job created successfully',
@@ -137,7 +138,7 @@ app.get('/api/jobs/:id', async (req, res) => {
         let segmentsList = [];
         try {
             const speakersRes = await query(
-                'SELECT speaker_label, fish_reference_id, target_lang FROM speakers WHERE job_id = $1 ORDER BY speaker_label',
+                'SELECT speaker_label, fish_reference_id, target_lang, voice_mode FROM speakers WHERE job_id = $1 ORDER BY speaker_label',
                 [jobId]
             );
             speakers = speakersRes.rows;

@@ -19,6 +19,8 @@ const SCHEMA_STATEMENTS: string[] = [
         created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     )`,
     `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload JSONB`,
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
+    `ALTER TABLE speakers ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
 
     `CREATE TABLE IF NOT EXISTS job_stages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

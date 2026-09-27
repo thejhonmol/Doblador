@@ -174,14 +174,15 @@ assembleWorker.on('completed', async (job, returnvalue) => {
 });
 
 // Helper function to trigger a new job (can be attached to an Express API)
-export async function startJob(videoPath: string, targetLang: string, providedJobId?: string) {
+export async function startJob(videoPath: string, targetLang: string, providedJobId?: string, voiceMode: string = 'clone') {
     const jobId = providedJobId || `job_${Date.now()}`;
-    console.log(`Starting pipeline for ${videoPath} to ${targetLang} (Job: ${jobId})`);
+    console.log(`Starting pipeline for ${videoPath} to ${targetLang} (Job: ${jobId}, Voice Mode: ${voiceMode})`);
 
     await extractQueue.add('extract-job', {
         videoPath,
         targetLang,
-        jobId
+        jobId,
+        voiceMode
     }, {
         attempts: STAGE_ATTEMPTS.extract.attempts,
         backoff: { type: 'exponential', delay: STAGE_ATTEMPTS.extract.delay }
