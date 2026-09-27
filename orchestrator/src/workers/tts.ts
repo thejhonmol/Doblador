@@ -306,7 +306,19 @@ async function generateSpeech(
             });
         }
     } catch (err: any) {
-        throw new HttpError(err.response?.data?.detail || err.message, err.response?.status);
+        let msg = err.message;
+        if (err.response?.data) {
+            try {
+                const text = Buffer.isBuffer(err.response.data)
+                    ? err.response.data.toString('utf-8')
+                    : (typeof err.response.data === 'string' ? err.response.data : JSON.stringify(err.response.data));
+                const parsed = JSON.parse(text);
+                msg = parsed.message || parsed.detail || text;
+            } catch {
+                if (typeof err.response.data === 'string') msg = err.response.data;
+            }
+        }
+        throw new HttpError(msg, err.response?.status);
     }
 
     const body = Buffer.from(response.data);
@@ -325,7 +337,8 @@ async function generateWithFailover(
     outputPath: string,
     activeKeys: string[],
     startSlot: number,
-    segLabel: string
+    segLabel: string,
+    lastErrorRef?: { message: string; status?: number }
 ): Promise<boolean> {
     for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_SEGMENT; attempt++) {
         const keyIndex = (startSlot + attempt - 1) % activeKeys.length;
@@ -335,6 +348,10 @@ async function generateWithFailover(
             return true;
         } catch (err: any) {
             const status = err instanceof HttpError ? err.status : undefined;
+            if (lastErrorRef) {
+                lastErrorRef.message = err.message;
+                lastErrorRef.status = status;
+            }
             const lastAttempt = attempt === MAX_ATTEMPTS_PER_SEGMENT;
             const retryable = status === undefined || RATE_LIMIT_STATUS.has(status);
             console.warn(
@@ -408,6 +425,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     const finalSegments = new Array(segments.length);
     let nextIndex = 0;
     let silentSegments = 0;
+    const sharedErrorRef = { message: '', status: undefined as number | undefined };
 
     async function workerTask(workerSlot: number) {
         while (true) {
@@ -450,7 +468,8 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                 audioPath,
                 activeKeys,
                 workerSlot,
-                segLabel
+                segLabel,
+                sharedErrorRef
             );
 
             if (generated) {
@@ -488,7 +507,17 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     }
     await Promise.all(workers);
 
-    console.log(`[TTS] Synthesis complete for job ${jobId}. ${finalSegments.length - silentSegments}/${finalSegments.length} segments voiced, ${silentSegments} silent.`);
+    const voicedSegments = finalSegments.length - silentSegments;
+    console.log(`[TTS] Synthesis complete for job ${jobId}. ${voicedSegments}/${finalSegments.length} segments voiced, ${silentSegments} silent.`);
+
+    if (voicedSegments === 0 && finalSegments.length > 0) {
+        const isCreditError = sharedErrorRef.status === 402 || /credit/i.test(sharedErrorRef.message);
+        const reason = isCreditError
+            ? 'Fish Audio API credit balance is exhausted (HTTP 402). API credit is managed independently from platform credit. Please add funds at https://fish.audio/app/developers or update FISH_AUDIO_API_KEY in .env.'
+            : (sharedErrorRef.message || 'All speech segments failed to generate.');
+        throw new Error(`TTS synthesis failed: 0/${finalSegments.length} segments could be generated. ${reason}`);
+    }
+
     if (silentSegments > 0) {
         console.warn(`[TTS] ${silentSegments} segment(s) have no usable audio. They will be gaps in the dubbed track.`);
     }
