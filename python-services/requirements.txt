@@ -1,0 +1,28 @@
+# Pinned versions matching verified production environment.
+# Using open ranges (`torch>=2.0.0`) caused reinstalls to pick
+# conflicting versions of demucs/torch/transformers and broke venv silently.
+#
+# torch and torchaudio use the +cu124 wheel index (CUDA 12.4 builds).
+# On a machine without an NVIDIA GPU, install CPU versions:
+#   pip install torch==2.5.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cpu
+
+fastapi==0.141.1
+uvicorn==0.53.0
+python-multipart==0.0.32
+
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+transcribe-cpp==0.2.3
+onnxruntime==1.30.0
+huggingface-hub>=0.23.0
+
+torch==2.5.1+cu124
+torchaudio==2.5.1+cu124
+demucs==4.1.0
+transformers==5.17.0
+
+soundfile==0.14.0
+scipy==1.17.1
+numpy==2.4.6
+librosa==0.11.0
+pyloudnorm==0.2.0
