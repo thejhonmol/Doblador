@@ -54,13 +54,14 @@ export const assembleWorker = new Worker('assemble', async (job: Job) => {
     const hasBackground = !!(backgroundAudioPath && fs.existsSync(backgroundAudioPath));
 
     // Ensure we have a continuous pre-stitched audio track to prevent Windows command-line limit issues
-    const defaultStitchedPath = path.join(path.dirname(videoPath), `${jobId}_tts_full.wav`);
-    let stitchedTrackPath = (fullTtsAudioPath && fs.existsSync(fullTtsAudioPath)) ? fullTtsAudioPath : null;
-    if (!stitchedTrackPath && fs.existsSync(defaultStitchedPath)) {
-        stitchedTrackPath = defaultStitchedPath;
-    }
+    // Only trust a carried track when the strict stitch report accompanies it.
+    // A same-named file left by an older build must be revalidated, not reused.
+    let stitchedTrackPath = (
+        fullTtsAudioPath && job.data.syncReport && fs.existsSync(fullTtsAudioPath)
+    ) ? fullTtsAudioPath : null;
     if (!stitchedTrackPath && segments && segments.length > 0) {
-        stitchedTrackPath = await stitchSegments(segments, videoPath, jobId, videoDurationSec, '[Assemble]');
+        const stitched = await stitchSegments(segments, videoPath, jobId, videoDurationSec, '[Assemble]');
+        stitchedTrackPath = stitched.outputPath;
     }
 
     if (stitchedTrackPath) {
@@ -84,7 +85,9 @@ export const assembleWorker = new Worker('assemble', async (job: Job) => {
             );
         }
     } else {
-        // Fallback: individual segment delay
+        // A video with no speech still needs an audio stream. Jobs containing any
+        // dialogue never reach this branch: strict stitching above either succeeds
+        // or throws, so adelay cannot bypass timing quality checks.
         let bgIndex = -1;
         if (hasBackground) {
             bgIndex = inputs.push(backgroundAudioPath) - 1;

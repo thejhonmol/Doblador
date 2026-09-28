@@ -5,35 +5,34 @@ import axios from 'axios';
 import FormData from 'form-data';
 
 /**
- * Tail margin added to the video duration so the stitch buffer is never shorter
- * than the source. Segments are placed at their original timestamps, so the video
- * length alone is enough; the margin only absorbs a final segment that overflows.
- */
-const TAIL_MARGIN_SEC = 5;
-
-/**
  * Length of the continuous speech buffer. The source video duration is
- * authoritative; the last segment end is only a floor for the degenerate case
- * where a segment sits beyond the video length.
+ * authoritative. Adding a hidden tail concealed dialogue that would later be cut
+ * by the video muxer, so the strict path uses the exact picture duration.
  */
 export function resolveTrackDurationSec(
     videoDurationSec: number | null | undefined,
     segments: any[]
 ): number {
-    const lastEndSec = segments.length
-        ? (segments[segments.length - 1]?.end_ms || 0) / 1000
-        : 0;
-    const floorSec = lastEndSec + TAIL_MARGIN_SEC;
+    const lastEndSec = segments.reduce(
+        (max, segment) => Math.max(max, Number(segment?.end_ms || 0) / 1000),
+        0
+    );
     const realSec = typeof videoDurationSec === 'number' && videoDurationSec > 0
         ? videoDurationSec
         : 0;
-    return Math.max(10, realSec || floorSec, floorSec);
+    return Math.max(0.1, realSec || lastEndSec + 0.5);
+}
+
+export interface StitchResult {
+    outputPath: string;
+    reportPath: string;
+    report: any;
 }
 
 /**
  * Asks the Python service to stitch the individual TTS clips into one continuous
- * 44.1 kHz track. Returns the path on success, or null if the service is
- * unreachable / the write failed (callers then fall back to per-segment mixing).
+ * 44.1 kHz track. Synchronization failures are terminal: silently falling back to
+ * per-segment adelay would bypass every drift and overlap quality gate.
  */
 export async function stitchSegments(
     segments: any[],
@@ -41,10 +40,11 @@ export async function stitchSegments(
     jobId: string,
     videoDurationSec: number | null | undefined,
     logPrefix: string
-): Promise<string | null> {
-    if (!segments || segments.length === 0) return null;
+): Promise<StitchResult> {
+    if (!Array.isArray(segments)) throw new Error(`${logPrefix} Cannot stitch a non-array segment payload.`);
 
     const outputPath = path.join(path.dirname(videoPath), `${jobId}_tts_full.wav`);
+    const reportPath = path.join(path.dirname(videoPath), `${jobId}_sync_report.json`);
     const totalDurationSec = resolveTrackDurationSec(videoDurationSec, segments);
 
     try {
@@ -63,9 +63,18 @@ export async function stitchSegments(
         const data = res.data || {};
 
         if (!fs.existsSync(outputPath)) {
-            console.warn(`${logPrefix} Stitch reported success but ${outputPath} is missing.`);
-            return null;
+            throw new Error(`${logPrefix} Stitch reported success but ${outputPath} is missing.`);
         }
+
+        if (!data.report || !Array.isArray(data.report.segments)) {
+            throw new Error(`${logPrefix} Stitch response did not include the synchronization report.`);
+        }
+        const report = {
+            ...data.report,
+            job_id: jobId,
+            generated_at: new Date().toISOString(),
+        };
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
 
         console.log(
             `${logPrefix} Stitched track ready at ${outputPath} ` +
@@ -73,15 +82,9 @@ export async function stitchSegments(
             `compressed ${data.compressed_count} | resynced ${data.resynced_count} | ` +
             `max start drift ${data.max_start_drift_ms}ms | overrun ${data.overrun_ms}ms)`
         );
-        if (typeof data.overrun_ms === 'number' && data.overrun_ms > 0) {
-            console.warn(
-                `${logPrefix} Warning: stitched audio runs ${data.overrun_ms}ms past the buffer. ` +
-                'Dialogue is longer than the video; check the transcribed timestamps.'
-            );
-        }
-        return outputPath;
+        return { outputPath, reportPath, report };
     } catch (err: any) {
-        console.warn(`${logPrefix} Warning: could not stitch continuous audio track: ${err.message}`);
-        return null;
+        const detail = err?.response?.data?.detail || err?.message || String(err);
+        throw new Error(`${logPrefix} Strict synchronization failed: ${detail}`);
     }
 }

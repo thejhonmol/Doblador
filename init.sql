@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 -- Essential to allow pipeline recovery on orchestrator restarts.
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload JSONB;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone';
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sync_report JSONB;
 
 -- Granular stage tracking
 CREATE TABLE IF NOT EXISTS job_stages (
@@ -49,7 +50,16 @@ CREATE TABLE IF NOT EXISTS segments (
     generated_ms INT,
     speed_used NUMERIC(4, 2) DEFAULT 1.00,
     emotion VARCHAR(32),
-    emotion_confidence NUMERIC(4, 3)
+    emotion_confidence NUMERIC(4, 3),
+    actual_start_ms INT,
+    actual_end_ms INT,
+    start_drift_ms INT,
+    original_overlap_ms INT,
+    actual_overlap_ms INT,
+    regeneration_count INT DEFAULT 0,
+    duration_ratio NUMERIC(6, 3),
+    sync_status VARCHAR(32),
+    word_timestamps JSONB DEFAULT '[]'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_segments_job ON segments(job_id);

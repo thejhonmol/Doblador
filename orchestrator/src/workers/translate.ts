@@ -1,7 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { GoogleGenAI, Type } from '@google/genai';
 import { redisConnection, GEMINI_API_KEY } from '../config';
-import { normalizeContextDiscovery } from '../pipeline-policy';
+import { normalizeContextDiscovery, syllableBudget } from '../pipeline-policy';
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
@@ -30,6 +30,9 @@ interface SegmentPayload {
     index: number;
     text: string;
     duration_sec: number | null;
+    target_syllables: number | null;
+    min_syllables: number | null;
+    max_syllables: number | null;
     speaker?: string;
     emotion?: string;
 }
@@ -208,7 +211,9 @@ UNIVERSAL DUBBING PRINCIPLES:
    - Never output raw symbols, URLs, or markdown.
    - Do not invent, hallucinate, or insert religious, absurd, or out-of-context phrases.
 2. RHYTHM & METRIC ADAPTATION:
-   - Adapt sentence structure so the syllable count matches the original speech duration as closely as possible.
+   - Every segment includes target_syllables, min_syllables and max_syllables calculated from its exact time slot.
+   - Stay inside that syllable range whenever the meaning can be preserved. Treat max_syllables as a hard dubbing budget, not a suggestion.
+   - Prefer contractions, natural synonyms and reordered phrasing over deleting meaning.
    - Avoid bloated translations; choose concise, natural spoken phrasing.
 3. REGISTER & DIALOGUE CONSISTENCY:
    - If a speaker is identified, maintain their level of formality (e.g. casual vs. formal) across all segments.
@@ -314,13 +319,20 @@ export const translateWorker = new Worker(
         // === PHASE 2: Batch translation with glossary & guidelines ===
         console.log(`[Translate] [Job ${jobId}] Phase 2: Translating in ${batches.length} batch(es)...`);
         for (const [batchIdx, batch] of batches.entries()) {
-            const segmentsPayload: SegmentPayload[] = batch.map((s) => ({
-                index: s._globalIndex,
-                text: s.text,
-                duration_sec: getDurationSec(s),
-                speaker: s.speaker_label ?? s.speaker,
-                emotion: s.emotion,
-            }));
+            const segmentsPayload: SegmentPayload[] = batch.map((s) => {
+                const durationSec = getDurationSec(s);
+                const budget = syllableBudget(durationSec, lang);
+                return {
+                    index: s._globalIndex,
+                    text: s.text,
+                    duration_sec: durationSec,
+                    target_syllables: budget.target,
+                    min_syllables: budget.min,
+                    max_syllables: budget.max,
+                    speaker: s.speaker_label ?? s.speaker,
+                    emotion: s.emotion,
+                };
+            });
 
             const prompt = `
 === FULL CONTEXT FOR REFERENCE ===
