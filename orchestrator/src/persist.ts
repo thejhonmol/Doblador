@@ -50,8 +50,11 @@ export async function persistSegments(jobId: string, segments: any[]): Promise<v
         await query(
             `INSERT INTO segments (job_id, speaker_label, start_ms, end_ms, source_text,
                                    translated_text, tts_audio_url, generated_ms, speed_used,
-                                   emotion, emotion_confidence)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+                                   emotion, emotion_confidence, actual_start_ms, actual_end_ms,
+                                   start_drift_ms, original_overlap_ms, actual_overlap_ms,
+                                   regeneration_count, duration_ratio, sync_status, word_timestamps)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                     $15, $16, $17, $18, $19, $20::jsonb)`,
             [
                 jobId,
                 label,
@@ -64,9 +67,24 @@ export async function persistSegments(jobId: string, segments: any[]): Promise<v
                 seg.speed_used ?? 1.0,
                 seg.emotion ?? null,
                 seg.emotion_confidence ?? null,
+                seg.actual_start_ms ?? null,
+                seg.actual_end_ms ?? null,
+                seg.start_drift_ms ?? null,
+                seg.original_overlap_ms ?? null,
+                seg.actual_overlap_ms ?? null,
+                seg.regeneration_count ?? 0,
+                seg.duration_ratio ?? null,
+                seg.sync_status ?? null,
+                JSON.stringify(Array.isArray(seg.words) ? seg.words : []),
             ]
         );
     }
+}
+
+/** Stores the complete JSON report on the durable job row for API download. */
+export async function persistSyncReport(jobId: string, report: unknown): Promise<void> {
+    if (!jobId || !report) return;
+    await query('UPDATE jobs SET sync_report = $2::jsonb WHERE id = $1', [jobId, JSON.stringify(report)]);
 }
 
 interface PoolVoiceLike {

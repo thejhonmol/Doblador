@@ -20,7 +20,7 @@ const SCHEMA_STATEMENTS: string[] = [
     )`,
     `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload JSONB`,
     `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
-    `ALTER TABLE speakers ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sync_report JSONB`,
 
     `CREATE TABLE IF NOT EXISTS job_stages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -41,6 +41,7 @@ const SCHEMA_STATEMENTS: string[] = [
         target_lang VARCHAR(10) NOT NULL,
         UNIQUE(job_id, speaker_label)
     )`,
+    `ALTER TABLE speakers ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
 
     `CREATE TABLE IF NOT EXISTS segments (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -58,6 +59,15 @@ const SCHEMA_STATEMENTS: string[] = [
     )`,
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS emotion VARCHAR(32)`,
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS emotion_confidence NUMERIC(4, 3)`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS actual_start_ms INT`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS actual_end_ms INT`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS start_drift_ms INT`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS original_overlap_ms INT`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS actual_overlap_ms INT`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS regeneration_count INT DEFAULT 0`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS duration_ratio NUMERIC(6, 3)`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS sync_status VARCHAR(32)`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS word_timestamps JSONB DEFAULT '[]'::jsonb`,
 
     `CREATE TABLE IF NOT EXISTS voices_catalog (
         fish_reference_id VARCHAR(64) PRIMARY KEY,

@@ -11,8 +11,12 @@ High-performance service built with **FastAPI** hosting GPU-accelerated deep lea
 
 ## 🎛️ Digital Signal Processing (DSP)
 - **`pyloudnorm`**: ITU-R BS.1770-4 loudness measurement and calibration per speaker.
-- **`librosa`**: Energy-based dynamic VAD trimming (`top_db=25`) and pitch-preserving phase vocoder time-stretching (`atempo`).
-- **`scipy` / `numpy`**: Anti-aliased multi-rate resampling, soft-knee bus limiting, and strict per-speaker non-collision stitching (`/stitch-tts`).
+- **`librosa`**: Energy-based dynamic VAD trimming (`top_db=25`).
+- **FFmpeg `atempo`**: Pitch-preserving speech time-stretching, bounded to 0.92x-1.25x.
+- **`scipy` / `numpy`**: Anti-aliased multi-rate resampling, soft-knee bus limiting, strict per-speaker non-collision stitching, 250 ms cross-speaker overlap and 900 ms drift gates (`/stitch-tts`).
+
+Both transcription paths return word timestamps. MOSS remains authoritative for text
+and speakers, while faster-whisper supplies its forced word-alignment pass.
 
 ## 🚀 Manual Execution
 ```bash

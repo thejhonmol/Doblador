@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Upload, FileVideo, Loader2, CheckCircle2, Mic, TextSelect, FileAudio, Film, Smile, ChevronDown, ChevronUp, Sparkles, Users } from 'lucide-react';
+import { Upload, FileVideo, Loader2, CheckCircle2, Mic, TextSelect, FileAudio, Film, Smile, ChevronDown, ChevronUp, Sparkles, Users, BarChart3, Download } from 'lucide-react';
 import './index.css';
 
 const API_URL = 'http://localhost:3000/api';
@@ -41,6 +41,18 @@ interface SegmentItem {
   emotion_confidence?: number;
 }
 
+interface SyncReport {
+  score: number;
+  grade: string;
+  summary: {
+    segments_total: number;
+    max_start_drift_ms: number;
+    regenerated_segments: number;
+    compressed_segments: number;
+    clipped_segments: number;
+  };
+}
+
 const EMOTION_MAP: Record<string, { label: string; emoji: string; color: string; bg: string }> = {
   happy: { label: 'Happy', emoji: '😊', color: '#4ade80', bg: 'rgba(34, 197, 94, 0.15)' },
   sad: { label: 'Sad', emoji: '😢', color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.15)' },
@@ -72,6 +84,7 @@ function App() {
   const [segmentCount, setSegmentCount] = useState(0);
   const [emotionsSummary, setEmotionsSummary] = useState<Record<string, number>>({});
   const [segments, setSegments] = useState<SegmentItem[]>([]);
+  const [syncReport, setSyncReport] = useState<SyncReport | null>(null);
   const [showTimeline, setShowTimeline] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -104,6 +117,7 @@ function App() {
     setStages([]);
     setEmotionsSummary({});
     setSegments([]);
+    setSyncReport(null);
     setShowTimeline(false);
 
     const formData = new FormData();
@@ -127,7 +141,8 @@ function App() {
         setSegmentCount(jobRes.data.segmentCount || 0);
         setEmotionsSummary(jobRes.data.emotionsSummary || {});
         setSegments(jobRes.data.segments || []);
-      } catch (_) {}
+        setSyncReport(jobRes.data.syncReport || null);
+      } catch {}
     } catch (err: any) {
       setError(err.response?.data?.error || err.message || 'Upload failed');
     } finally {
@@ -147,6 +162,7 @@ function App() {
         setSegmentCount(res.data.segmentCount || 0);
         setEmotionsSummary(res.data.emotionsSummary || {});
         setSegments(res.data.segments || []);
+        setSyncReport(res.data.syncReport || null);
 
         if (res.data.job.status === 'completed' || res.data.job.status === 'failed') {
           clearInterval(interval);
@@ -463,6 +479,31 @@ function App() {
               </div>
             )}
 
+            {syncReport && (
+              <div className="speakers-summary-box">
+                <div className="speakers-summary-header">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '0.45rem' }}>
+                    <BarChart3 size={17} /> Synchronization Quality
+                  </span>
+                  <span className="speakers-badge">{syncReport.score}/100 · {syncReport.grade}</span>
+                </div>
+                <div className="speakers-grid">
+                  <div className="speaker-pill">Max drift: {syncReport.summary.max_start_drift_ms} ms</div>
+                  <div className="speaker-pill">Regenerated: {syncReport.summary.regenerated_segments}</div>
+                  <div className="speaker-pill">Compressed: {syncReport.summary.compressed_segments}</div>
+                  <div className="speaker-pill">Clipped: {syncReport.summary.clipped_segments}</div>
+                </div>
+                <a
+                  href={`${API_URL}/jobs/${jobId}/sync-report`}
+                  download
+                  className="btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.45rem', textDecoration: 'none', marginTop: '1rem' }}
+                >
+                  <Download size={16} /> Download Synchronization Report
+                </a>
+              </div>
+            )}
+
             {job.status === 'completed' && finalVideoUrl && (
               <div style={{ marginTop: '2rem' }}>
                 <h4 style={{ marginBottom: '0.8rem', color: 'var(--text-primary)' }}>Dubbed Result</h4>
@@ -487,6 +528,7 @@ function App() {
                 setSegmentCount(0);
                 setEmotionsSummary({});
                 setSegments([]);
+                setSyncReport(null);
                 setShowTimeline(false);
               }}>
                 Dub Another Video

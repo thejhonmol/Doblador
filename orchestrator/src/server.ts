@@ -158,7 +158,11 @@ app.get('/api/jobs/:id', async (req, res) => {
             }
 
             const detailedSegs = await query(
-                `SELECT speaker_label, start_ms, end_ms, source_text, translated_text, emotion, emotion_confidence
+                `SELECT speaker_label, start_ms, end_ms, source_text, translated_text,
+                        emotion, emotion_confidence, generated_ms, speed_used,
+                        actual_start_ms, actual_end_ms, start_drift_ms,
+                        original_overlap_ms, actual_overlap_ms, regeneration_count,
+                        duration_ratio, sync_status
                  FROM segments
                  WHERE job_id = $1
                  ORDER BY start_ms ASC LIMIT 100`,
@@ -169,17 +173,34 @@ app.get('/api/jobs/:id', async (req, res) => {
             console.warn(`[API] Could not read speakers/segments for job ${jobId}: ${dbErr.message}`);
         }
 
+        const { sync_report: syncReport, ...jobRow } = jobResult.rows[0];
         res.json({
-            job: jobResult.rows[0],
+            job: jobRow,
             stages,
             speakers,
             segmentCount,
             emotionsSummary,
-            segments: segmentsList
+            segments: segmentsList,
+            syncReport: syncReport || null,
         });
     } catch (error: any) {
         console.error('Error fetching job:', error);
         res.status(500).json({ error: error.message });
+    }
+});
+
+/** Download the auditable per-segment synchronization metrics as JSON. */
+app.get('/api/jobs/:id/sync-report', async (req, res) => {
+    try {
+        const { rows, rowCount } = await query('SELECT sync_report FROM jobs WHERE id = $1', [req.params.id]);
+        if (rowCount === 0) return res.status(404).json({ error: 'Job not found' });
+        if (!rows[0].sync_report) return res.status(404).json({ error: 'Synchronization report is not ready' });
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('Content-Disposition', `attachment; filename="${req.params.id}_sync_report.json"`);
+        return res.send(JSON.stringify(rows[0].sync_report, null, 2));
+    } catch (error: any) {
+        console.error('Error downloading synchronization report:', error);
+        return res.status(500).json({ error: error.message });
     }
 });
 
