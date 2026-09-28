@@ -2,19 +2,20 @@ services:
   db:
     image: postgres:15
     environment:
-      POSTGRES_USER: doblador
-      POSTGRES_PASSWORD: doblador_password
-      POSTGRES_DB: doblador_db
+      POSTGRES_USER: ${DB_USER:-doblador}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in orchestrator/.env}
+      POSTGRES_DB: ${DB_NAME:-doblador_db}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
   redis:
     image: redis:7
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in orchestrator/.env}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
 

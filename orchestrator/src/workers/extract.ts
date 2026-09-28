@@ -47,23 +47,39 @@ export const extractWorker = new Worker('extract', async (job: Job) => {
     const videoDurationSec = await probeDurationSec(videoPath);
     console.log(`[Extract] Source video duration: ${videoDurationSec !== null ? `${videoDurationSec.toFixed(2)}s` : 'unknown'}`);
 
+    // Keep two purpose-built inputs. ASR benefits from a compact 16 kHz mono file,
+    // while Demucs must receive a full-bandwidth stereo source or the delivered
+    // background track permanently loses high frequencies and stereo imaging.
     const audioOutputPath = path.join(path.dirname(videoPath), `${jobId}_extracted.wav`);
+    const separationInputPath = path.join(path.dirname(videoPath), `${jobId}_separation_source.wav`);
     const backgroundAudioPath = path.join(path.dirname(videoPath), `${jobId}_background.wav`);
     const vocalsAudioPath = path.join(path.dirname(videoPath), `${jobId}_vocals.wav`);
 
-    // Extract audio
-    await new Promise((resolve, reject) => {
+    // Full-quality source for separation.
+    await new Promise<void>((resolve, reject) => {
+        ffmpeg(videoPath)
+            .noVideo()
+            .audioCodec('pcm_s24le')
+            .audioFrequency(48000)
+            .audioChannels(2)
+            .save(separationInputPath)
+            .on('end', () => resolve())
+            .on('error', reject);
+    });
+
+    // Compact speech-oriented source for transcription.
+    await new Promise<void>((resolve, reject) => {
         ffmpeg(videoPath)
             .noVideo()
             .audioCodec('pcm_s16le')
             .audioFrequency(16000)
             .audioChannels(1)
             .save(audioOutputPath)
-            .on('end', resolve)
+            .on('end', () => resolve())
             .on('error', reject);
     });
 
-    console.log(`[Extract] Extracted to ${audioOutputPath}`);
+    console.log(`[Extract] ASR audio: ${audioOutputPath}; separation source: ${separationInputPath}`);
 
     // Ensure Python services are ready (allows up to 30s for AI models to finish booting)
     let serviceReady = false;
@@ -95,7 +111,7 @@ export const extractWorker = new Worker('extract', async (job: Job) => {
         separateAttempts = attempt;
         try {
             const form = new FormData();
-            form.append('file', fs.createReadStream(audioOutputPath));
+            form.append('file', fs.createReadStream(separationInputPath));
             form.append('output_background_path', backgroundAudioPath);
             form.append('output_vocals_path', vocalsAudioPath);
             const res = await axios.post(`${PYTHON_SERVICES_URL}/separate`, form, {
@@ -138,6 +154,10 @@ export const extractWorker = new Worker('extract', async (job: Job) => {
             'audio track is never mapped into the output.'
         );
     }
+
+    // The 48 kHz stereo source is only an input to Demucs. The separated stems are
+    // now durable, so release this large intermediate before the remaining stages.
+    try { if (fs.existsSync(separationInputPath)) fs.unlinkSync(separationInputPath); } catch { /* best effort */ }
 
     // ── Transcription + diarization ──
     console.log(`[Extract] Transcribing and diarizing...`);

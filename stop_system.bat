@@ -11,7 +11,13 @@ echo.
 
 :: -- 1. Stop Docker containers first --
 echo [1/3] Stopping Docker containers (PostgreSQL and Redis)...
-docker compose down
+if exist "%~dp0orchestrator\.env" (
+    docker compose --env-file "%~dp0orchestrator\.env" down
+) else (
+    set DB_PASSWORD=unused_for_shutdown
+    set REDIS_PASSWORD=unused_for_shutdown
+    docker compose down
+)
 echo      -^> Docker stopped and database ports released.
 
 :: -- 2. Free service ports by PID --

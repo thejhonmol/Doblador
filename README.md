@@ -205,6 +205,10 @@ GEMINI_API_KEY=your_gemini_api_key_here
 FISH_AUDIO_API_KEY=your_first_fish_api_key
 FISH_AUDIO_API_KEY_2=your_second_optional_key
 FISH_AUDIO_API_KEY_3=your_third_optional_key
+
+# Required local-service passwords (generate two long random values)
+DB_PASSWORD=replace_with_a_long_random_local_password
+REDIS_PASSWORD=replace_with_a_long_random_local_password
 ```
 
 Operational variables (pre-configured in `.env.example`):
@@ -215,9 +219,14 @@ Operational variables (pre-configured in `.env.example`):
 | `MAX_UPLOAD_MB` | `2048` | Maximum video upload size in MB |
 | `API_BIND_HOST` | `127.0.0.1` | API listening interface (keep loopback for local security) |
 | `PYTHON_SERVICES_URL`| `http://127.0.0.1:8000` | Python microservice URL |
+| `DB_PASSWORD` | required | Local PostgreSQL password; Docker only publishes the port on loopback |
+| `REDIS_PASSWORD` | required | Local Redis password; Docker only publishes the port on loopback |
 
 > [!NOTE]
 > `.env` is explicitly ignored by `.gitignore`. Never commit your real API keys to version control.
+> Existing installations must add `REDIS_PASSWORD` and replace the former default
+> `DB_PASSWORD` before restarting. `start_system.bat` passes `orchestrator/.env` to
+> Docker Compose so both the containers and the orchestrator use the same values.
 
 ### Starting the System
 Run [`start_system.bat`](file:///c:/Users/USER/Documents/Doblador/start_system.bat) from the command line:
@@ -230,6 +239,12 @@ The startup sequence automatically executes:
 3. Launches the Python microservice at `http://127.0.0.1:8000` and polls until `200 OK` is returned after GPU models load into VRAM.
 4. Compiles the TypeScript orchestrator (`npm run build`) and starts the worker process on `http://127.0.0.1:3000`.
 5. Launches the Vite development server for the web client at `http://localhost:5173`.
+
+### Orchestrator Tests
+
+From `orchestrator/`, run `npm test`. The regression suite covers Fish Audio
+credential failover policy, incomplete-dialogue rejection, optional Gemini fields,
+and recovery-stage selection after a restart.
 
 ### Stopping the System
 To shut down all services cleanly:

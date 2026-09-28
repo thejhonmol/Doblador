@@ -81,39 +81,3 @@ export async function migrate(): Promise<void> {
     }
     console.log('[DB] Schema verified (idempotent migration applied).');
 }
-
-/**
- * Marks jobs that were in flight when the process died as failed.
- *
- * The pipeline is driven by `worker.on('completed')` handlers living in this same
- * process. If the orchestrator is killed mid-run, the `completed` event never
- * fires, the BullMQ job stalls and the row stays 'processing' forever. That
- * already happened in production: 4 jobs were stuck in 'pending'/'processing' and
- * one had failed with "job stalled more than allowable limit".
- *
- * Called before the queues start consuming, so nothing is in flight yet and
- * 'processing' genuinely means "orphaned by a previous run".
- */
-export async function reconcileOrphanedJobs(): Promise<number> {
-    const { rows } = await query(
-        `UPDATE jobs SET status = 'failed'
-         WHERE status IN ('pending', 'processing')
-         RETURNING id`
-    );
-    if (rows.length === 0) return 0;
-
-    const ids = rows.map((r: { id: string }) => r.id);
-    await query(
-        `UPDATE job_stages
-         SET status = 'failed',
-             error = COALESCE(error, 'Orchestrator restarted while stage was in progress; job cannot resume automatically.'),
-             finished_at = NOW()
-         WHERE job_id = ANY($1::uuid[]) AND status = 'processing'`,
-        [ids]
-    );
-
-    console.warn(
-        `[DB] Reconciled ${rows.length} orphaned job(s) left in-flight by a previous run: ${ids.join(', ')}`
-    );
-    return rows.length;
-}

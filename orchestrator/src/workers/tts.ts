@@ -8,6 +8,7 @@ import path from 'path';
 import FormData from 'form-data';
 import ffmpeg from 'fluent-ffmpeg';
 import { encode } from '@msgpack/msgpack';
+import { assertSpeechSynthesisComplete, ttsFailureAction } from '../pipeline-policy';
 
 // Default reference voice — change this to match your preferred voice from Fish Audio catalog
 const DEFAULT_REFERENCE_ID = '7033e0e6d35e404d81a100701ceca41b';
@@ -24,7 +25,6 @@ const MAX_CONCURRENCY = 6;
 const MAX_ATTEMPTS_PER_SEGMENT = 4;
 const BASE_BACKOFF_MS = 2000;
 const MAX_BACKOFF_MS = 30000;
-const RATE_LIMIT_STATUS = new Set([429, 500, 502, 503, 504]);
 
 // Parse comma-separated voice IDs from environment variable
 function parseVoicePool(envVal?: string, fallback: string[] = []): string[] {
@@ -340,8 +340,20 @@ async function generateWithFailover(
     segLabel: string,
     lastErrorRef?: { message: string; status?: number }
 ): Promise<boolean> {
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_SEGMENT; attempt++) {
-        const keyIndex = (startSlot + attempt - 1) % activeKeys.length;
+    // Always leave enough attempts to visit every configured key at least once.
+    const maxAttempts = Math.max(MAX_ATTEMPTS_PER_SEGMENT, activeKeys.length);
+    const unusableKeys = new Set<number>();
+    let keyCursor = startSlot;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        let keyIndex = keyCursor % activeKeys.length;
+        let inspected = 0;
+        while (unusableKeys.has(keyIndex) && inspected < activeKeys.length) {
+            keyCursor++;
+            keyIndex = keyCursor % activeKeys.length;
+            inspected++;
+        }
+        if (inspected >= activeKeys.length) break;
+        keyCursor = keyIndex + 1;
         const key = activeKeys[keyIndex];
         try {
             await generateSpeech(text, target, outputPath, key);
@@ -352,16 +364,23 @@ async function generateWithFailover(
                 lastErrorRef.message = err.message;
                 lastErrorRef.status = status;
             }
-            const lastAttempt = attempt === MAX_ATTEMPTS_PER_SEGMENT;
-            const retryable = status === undefined || RATE_LIMIT_STATUS.has(status);
+            const lastAttempt = attempt === maxAttempts;
+            const action = ttsFailureAction(status);
             console.warn(
-                `[TTS] ${segLabel} attempt ${attempt}/${MAX_ATTEMPTS_PER_SEGMENT} ` +
+                `[TTS] ${segLabel} attempt ${attempt}/${maxAttempts} ` +
                 `failed on key #${keyIndex + 1}${status ? ` (HTTP ${status})` : ''}: ${err.message}` +
-                (retryable ? '' : ' (not retryable, moving to the next key)')
+                (action === 'next-key' ? ' (credential-specific failure; trying the next key)' : '') +
+                (action === 'stop' ? ' (request-level failure; stopping retries)' : '')
             );
-            if (lastAttempt || !retryable) break;
-            const backoff = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1));
-            await new Promise((r) => setTimeout(r, backoff + Math.floor(Math.random() * 500)));
+            if (lastAttempt || action === 'stop') break;
+            if (action === 'next-key') {
+                unusableKeys.add(keyIndex);
+                if (unusableKeys.size === activeKeys.length) break;
+            }
+            if (action === 'retry') {
+                const backoff = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, attempt - 1));
+                await new Promise((r) => setTimeout(r, backoff + Math.floor(Math.random() * 500)));
+            }
         }
     }
     return false;
@@ -425,6 +444,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     const finalSegments = new Array(segments.length);
     let nextIndex = 0;
     let silentSegments = 0;
+    let failedSpeechSegments = 0;
     const sharedErrorRef = { message: '', status: undefined as number | undefined };
 
     async function workerTask(workerSlot: number) {
@@ -457,6 +477,11 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                     fish_reference_id: referenceIdForSeg,
                 };
                 silentSegments++;
+                // Translation guarantees text for speakable source segments. If it
+                // is missing here, do not let a dialogue gap reach the final video.
+                if (String(seg.text || '').replace(/[^\p{L}\p{N}]/gu, '').length >= 3) {
+                    failedSpeechSegments++;
+                }
                 continue;
             }
 
@@ -482,7 +507,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                     fish_reference_id: referenceIdForSeg,
                 };
             } else {
-                console.error(`[TTS] ${segLabel} failed on all ${activeKeys.length} key(s) after ${MAX_ATTEMPTS_PER_SEGMENT} attempts. Using silence.`);
+                console.error(`[TTS] ${segLabel} failed across all usable credentials. Using temporary silence; the stage will be rejected after synthesis.`);
                 const fallbackPath = path.join(outputDir, `seg_${i}.wav`);
                 createSilentWav(fallbackPath, targetMs / 1000);
                 finalSegments[i] = {
@@ -493,6 +518,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
                     fish_reference_id: referenceIdForSeg,
                 };
                 silentSegments++;
+                failedSpeechSegments++;
             }
 
             // Small delay between calls on this slot to reduce rate throttling.
@@ -510,13 +536,7 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     const voicedSegments = finalSegments.length - silentSegments;
     console.log(`[TTS] Synthesis complete for job ${jobId}. ${voicedSegments}/${finalSegments.length} segments voiced, ${silentSegments} silent.`);
 
-    if (voicedSegments === 0 && finalSegments.length > 0) {
-        const isCreditError = sharedErrorRef.status === 402 || /credit/i.test(sharedErrorRef.message);
-        const reason = isCreditError
-            ? 'Fish Audio API credit balance is exhausted (HTTP 402). API credit is managed independently from platform credit. Please add funds at https://fish.audio/app/developers or update FISH_AUDIO_API_KEY in .env.'
-            : (sharedErrorRef.message || 'All speech segments failed to generate.');
-        throw new Error(`TTS synthesis failed: 0/${finalSegments.length} segments could be generated. ${reason}`);
-    }
+    assertSpeechSynthesisComplete(failedSpeechSegments, sharedErrorRef.message, sharedErrorRef.status);
 
     if (silentSegments > 0) {
         console.warn(`[TTS] ${silentSegments} segment(s) have no usable audio. They will be gaps in the dubbed track.`);

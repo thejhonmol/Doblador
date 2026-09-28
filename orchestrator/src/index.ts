@@ -1,7 +1,8 @@
-import { Queue } from 'bullmq';
+import { Job, Queue, JobsOptions } from 'bullmq';
 import { redisConnection } from './config';
 import { query } from './db';
-import { migrate, reconcileOrphanedJobs } from './migrate';
+import { migrate } from './migrate';
+import { nextIncompleteStage, PIPELINE_STAGES, PipelineStage } from './pipeline-policy';
 
 import { extractWorker } from './workers/extract';
 import { translateWorker } from './workers/translate';
@@ -38,12 +39,138 @@ const assembleQueue = new Queue('assemble', { connection: redisConnection });
 // Retry policy per stage. extract and assemble previously called `.add()` with no
 // `attempts`, so a single transient failure killed the whole job while translate
 // got 5 tries and tts got 3.
-const STAGE_ATTEMPTS: Record<string, { attempts: number; delay: number }> = {
+const STAGE_ATTEMPTS: Record<PipelineStage, { attempts: number; delay: number }> = {
     extract: { attempts: 3, delay: 10000 },
     translate: { attempts: 5, delay: 3000 },
     tts: { attempts: 3, delay: 2000 },
     assemble: { attempts: 2, delay: 5000 },
 };
+
+const queuesByStage: Record<PipelineStage, Queue> = {
+    extract: extractQueue,
+    translate: translateQueue,
+    tts: ttsQueue,
+    assemble: assembleQueue,
+};
+
+function stageJobOptions(stage: PipelineStage, pipelineJobId: string): JobsOptions {
+    const policy = STAGE_ATTEMPTS[stage];
+    return {
+        jobId: `${pipelineJobId}-${stage}`,
+        attempts: policy.attempts,
+        backoff: { type: 'exponential', delay: policy.delay },
+    };
+}
+
+async function enqueueStage(stage: PipelineStage, data: any): Promise<void> {
+    const pipelineJobId = data?.jobId;
+    if (!pipelineJobId) throw new Error(`Cannot enqueue '${stage}' without a pipeline jobId.`);
+    await queuesByStage[stage].add(`${stage}-job`, data, stageJobOptions(stage, pipelineJobId));
+}
+
+async function findPipelineJob(stage: PipelineStage, pipelineJobId: string): Promise<Job | undefined> {
+    const stableJob = await queuesByStage[stage].getJob(`${pipelineJobId}-${stage}`);
+    if (stableJob) return stableJob;
+
+    // Compatibility with jobs created before deterministic stage IDs were added.
+    const jobs = await queuesByStage[stage].getJobs(
+        ['waiting', 'active', 'delayed', 'paused', 'prioritized'] as any,
+        0,
+        -1,
+        false
+    );
+    return jobs.find((job) => job.data?.jobId === pipelineJobId);
+}
+
+/**
+ * Repairs the narrow crash window between completing one worker and enqueuing the
+ * next. Existing BullMQ jobs are left alone so its own stalled-job recovery can do
+ * its job; only a genuinely missing stage is reconstructed from the durable payload.
+ */
+async function recoverInterruptedJobs(): Promise<number> {
+    const { rows } = await query(
+        `SELECT j.id, j.status, j.source_url, j.target_lang, j.voice_mode, j.payload,
+                ARRAY(SELECT js.stage FROM job_stages js
+                      WHERE js.job_id = j.id AND js.status = 'completed') AS completed_stages,
+                EXISTS(SELECT 1 FROM job_stages js
+                       WHERE js.job_id = j.id AND js.status = 'failed') AS has_failed_stage
+         FROM jobs j
+         WHERE j.status IN ('pending', 'processing')`
+    );
+
+    let recovered = 0;
+    for (const row of rows) {
+        if (row.has_failed_stage) {
+            await query(`UPDATE jobs SET status = 'failed' WHERE id = $1`, [row.id]);
+            continue;
+        }
+
+        const stage = nextIncompleteStage(row.completed_stages || []);
+        if (!stage) {
+            await query(`UPDATE jobs SET status = 'completed' WHERE id = $1`, [row.id]);
+            continue;
+        }
+        const existingJob = await findPipelineJob(stage, row.id);
+        if (existingJob) {
+            const state = await existingJob.getState();
+            if (state === 'completed') {
+                const result = existingJob.returnvalue;
+                if (!result) {
+                    await updateStage(row.id, stage, 'failed', null, `Completed '${stage}' queue job has no return value.`);
+                    continue;
+                }
+                await updateStage(
+                    row.id,
+                    stage,
+                    'completed',
+                    stage === 'assemble' ? result.finalVideoPath || null : null
+                );
+                if (stage !== 'assemble') {
+                    await persistPayload(row.id, result);
+                    const nextStage = PIPELINE_STAGES[PIPELINE_STAGES.indexOf(stage) + 1];
+                    if (nextStage) await enqueueStage(nextStage, { ...result, jobId: row.id });
+                }
+                recovered++;
+                console.warn(`[Recovery] Reconciled completed '${stage}' queue job for ${row.id}.`);
+            } else if (state === 'failed') {
+                await updateStage(
+                    row.id,
+                    stage,
+                    'failed',
+                    null,
+                    existingJob.failedReason || `Stage '${stage}' failed before its DB state was recorded.`
+                );
+            }
+            continue;
+        }
+
+        let data: any;
+        if (stage === 'extract') {
+            data = {
+                videoPath: row.source_url,
+                targetLang: row.target_lang,
+                voiceMode: row.voice_mode || 'clone',
+                jobId: row.id,
+            };
+        } else {
+            data = typeof row.payload === 'string' ? JSON.parse(row.payload) : row.payload;
+            if (data) data = { ...data, jobId: row.id };
+        }
+
+        if (!data) {
+            const message = `Cannot recover stage '${stage}': the previous stage payload is missing.`;
+            await query(`UPDATE jobs SET status = 'failed' WHERE id = $1`, [row.id]);
+            await updateStage(row.id, stage, 'failed', null, message);
+            console.error(`[Recovery] ${row.id}: ${message}`);
+            continue;
+        }
+
+        await enqueueStage(stage, data);
+        recovered++;
+        console.warn(`[Recovery] Re-enqueued missing '${stage}' stage for job ${row.id}.`);
+    }
+    return recovered;
+}
 
 // Helper to update DB stage status
 async function updateStage(jobId: string, stage: string, status: string, url: string | null = null, error: string | null = null) {
@@ -139,10 +266,7 @@ extractWorker.on('completed', async (job, returnvalue) => {
     console.log(`[Flow] Extract completed for ${pJobId}. Moving to Translate.`);
     await updateStage(pJobId, 'extract', 'completed');
     await persistPayload(pJobId, returnvalue);
-    await translateQueue.add('translate-job', returnvalue, {
-        attempts: STAGE_ATTEMPTS.translate.attempts,
-        backoff: { type: 'exponential', delay: STAGE_ATTEMPTS.translate.delay }
-    });
+    await enqueueStage('translate', returnvalue);
 });
 
 translateWorker.on('completed', async (job, returnvalue) => {
@@ -150,10 +274,7 @@ translateWorker.on('completed', async (job, returnvalue) => {
     console.log(`[Flow] Translate completed for ${pJobId}. Moving to TTS.`);
     await updateStage(pJobId, 'translate', 'completed');
     await persistPayload(pJobId, returnvalue);
-    await ttsQueue.add('tts-job', returnvalue, {
-        attempts: STAGE_ATTEMPTS.tts.attempts,
-        backoff: { type: 'exponential', delay: STAGE_ATTEMPTS.tts.delay }
-    });
+    await enqueueStage('tts', returnvalue);
 });
 
 ttsWorker.on('completed', async (job, returnvalue) => {
@@ -161,10 +282,7 @@ ttsWorker.on('completed', async (job, returnvalue) => {
     console.log(`[Flow] TTS completed for ${pJobId}. Moving to Assemble.`);
     await updateStage(pJobId, 'tts', 'completed');
     await persistPayload(pJobId, returnvalue);
-    await assembleQueue.add('assemble-job', returnvalue, {
-        attempts: STAGE_ATTEMPTS.assemble.attempts,
-        backoff: { type: 'exponential', delay: STAGE_ATTEMPTS.assemble.delay }
-    });
+    await enqueueStage('assemble', returnvalue);
 });
 
 assembleWorker.on('completed', async (job, returnvalue) => {
@@ -178,14 +296,11 @@ export async function startJob(videoPath: string, targetLang: string, providedJo
     const jobId = providedJobId || `job_${Date.now()}`;
     console.log(`Starting pipeline for ${videoPath} to ${targetLang} (Job: ${jobId}, Voice Mode: ${voiceMode})`);
 
-    await extractQueue.add('extract-job', {
+    await enqueueStage('extract', {
         videoPath,
         targetLang,
         jobId,
         voiceMode
-    }, {
-        attempts: STAGE_ATTEMPTS.extract.attempts,
-        backoff: { type: 'exponential', delay: STAGE_ATTEMPTS.extract.delay }
     });
 
     return jobId;
@@ -195,7 +310,10 @@ async function bootstrap(): Promise<void> {
     await paused;
     await waitForDatabase();
     await migrate();
-    await reconcileOrphanedJobs();
+    const recovered = await recoverInterruptedJobs();
+    if (recovered > 0) {
+        console.warn(`[Recovery] Restored ${recovered} interrupted pipeline stage(s).`);
+    }
 
     // Seed voices_catalog at boot, not only when a job reaches the TTS stage: the
     // /api/voices endpoint is read by tooling that has no job to offer.

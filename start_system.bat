@@ -3,6 +3,13 @@ chcp 65001 >nul
 title Doblador - System Starter
 cd /d "%~dp0"
 
+if not exist "%~dp0orchestrator\.env" (
+    echo [ERROR] Missing orchestrator\.env.
+    echo         Copy .env.example to orchestrator\.env and configure the API keys and local passwords.
+    pause
+    exit /b 1
+)
+
 set PY_PORT=8000
 set API_PORT=3000
 set WEB_PORT=5173
@@ -26,7 +33,7 @@ if %errorlevel% neq 0 (
 :: 1. Start Docker (PostgreSQL and Redis)
 echo.
 echo [1/4] Starting Docker containers (PostgreSQL and Redis)...
-docker compose up -d
+docker compose --env-file "%~dp0orchestrator\.env" up -d
 if %errorlevel% neq 0 (
     echo.
     echo [ERROR] Failed to start Docker. Please make sure Docker Desktop is running.

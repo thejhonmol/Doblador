@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { GoogleGenAI, Type } from '@google/genai';
 import { redisConnection, GEMINI_API_KEY } from '../config';
+import { normalizeContextDiscovery } from '../pipeline-policy';
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
@@ -159,11 +160,12 @@ Your objectives:
     };
 
     try {
-        return await callGeminiWithFallback<ContextDiscovery>(
+        const result = await callGeminiWithFallback<ContextDiscovery>(
             systemInstruction,
             `Complete video transcript for analysis:\n"""${fullTranscript}"""`,
             schema
         );
+        return normalizeContextDiscovery(result);
     } catch (e) {
         console.warn('[Translate] Phase 1 fallback active: proceeding with neutral defaults');
         return {

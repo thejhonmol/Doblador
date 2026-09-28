@@ -6,6 +6,8 @@ import math
 import tempfile
 import subprocess
 import shutil
+import threading
+from functools import wraps
 
 # Add NVIDIA CUDA DLL paths to PATH so ctranslate2 can find cublas64_12.dll, cudnn, etc.
 _site_packages = os.path.join(os.path.dirname(sys.executable), '..', 'Lib', 'site-packages')
@@ -64,6 +66,20 @@ def safe_path(raw_path: str, must_exist: bool = False) -> str:
     return candidate
 
 app = FastAPI(title="Doblador MVP - Python Services")
+
+# FastAPI executes ordinary `def` endpoints in its worker thread pool, keeping the
+# event loop (and / health checks) responsive while ffmpeg and ML inference run.
+# The models share one GPU, so serialize heavy requests to avoid concurrent VRAM
+# spikes while still allowing lightweight endpoints to respond immediately.
+_ai_work_lock = threading.Lock()
+
+
+def serialized_ai_work(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        with _ai_work_lock:
+            return func(*args, **kwargs)
+    return wrapped
 
 # Initialize Whisper model.
 # Tries CUDA first, falls back to CPU if CUDA runtime libs are missing.
@@ -368,7 +384,8 @@ def health_check():
     }
 
 @app.post("/separate")
-async def separate_audio(
+@serialized_ai_work
+def separate_audio(
     file: UploadFile = File(...),
     output_background_path: str = Form(None),
     output_vocals_path: str = Form(None),
@@ -470,7 +487,8 @@ async def separate_audio(
 
 
 @app.post("/measure-speakers-loudness")
-async def measure_speakers_loudness(
+@serialized_ai_work
+def measure_speakers_loudness(
     vocals_path: str = Form(...),
     segments_json: str = Form(...)
 ):
@@ -517,7 +535,8 @@ async def measure_speakers_loudness(
 
 
 @app.post("/normalize-tts")
-async def normalize_tts(
+@serialized_ai_work
+def normalize_tts(
     output_dir: str = Form(...),
     target_lufs: float = Form(-18.0),
     speakers_lufs_json: str = Form("{}"),
@@ -663,7 +682,8 @@ def _soft_limit(
 
 
 @app.post("/stitch-tts")
-async def stitch_tts(
+@serialized_ai_work
+def stitch_tts(
     segments_json: str = Form(...),
     total_duration_sec: float = Form(...),
     output_path: str = Form(...)
@@ -869,7 +889,8 @@ async def stitch_tts(
 
 
 @app.post("/transcribe")
-async def transcribe_audio(
+@serialized_ai_work
+def transcribe_audio(
     file: UploadFile = File(...),
     engine: str = None,
     age_gender_audio_path: str = Form(None)
@@ -1038,7 +1059,8 @@ async def transcribe_audio(
 
 
 @app.post("/classify-emotions")
-async def classify_emotions_endpoint(
+@serialized_ai_work
+def classify_emotions_endpoint(
     audio_path: str = Form(...),
     segments_json: str = Form(...)
 ):
@@ -1072,4 +1094,3 @@ if __name__ == "__main__":
     # whole LAN. Override with PY_BIND_HOST only if you understand that.
     bind_host = os.environ.get("PY_BIND_HOST", "127.0.0.1")
     uvicorn.run(app, host=bind_host, port=8000)
-
