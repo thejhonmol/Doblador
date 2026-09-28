@@ -157,11 +157,11 @@ Doblador/
 │
 ├── orchestrator/            # Workflow Orchestrator (Node.js + BullMQ)
 │   ├── src/
-│   │   ├── index.ts         # Entry point and BullMQ queue listeners
+│   │   ├── index.ts         # BullMQ orchestration and interrupted-job recovery
 │   │   ├── server.ts        # Express API (upload, job state, download endpoints)
 │   │   ├── config.ts        # Environment configuration and voice pools
 │   │   ├── db.ts            # PostgreSQL connection and queries
-│   │   ├── migrate.ts       # Idempotent schema migrations and orphan job recovery
+│   │   ├── migrate.ts       # Idempotent PostgreSQL schema migrations
 │   │   ├── persist.ts       # Database persistence for segments and speaker mapping
 │   │   └── workers/
 │   │       ├── extract.ts   # Audio extraction, Demucs, STT, diarization, duration probing
@@ -278,9 +278,12 @@ stop_system.bat
 
 ## 🗄️ Database Management
 
-PostgreSQL migrations are executed idempotently upon orchestrator boot via `src/migrate.ts`:
-- `jobs.payload` preserves intermediate outputs across worker stages to survive process restarts.
-- In-flight jobs from prior crashes are automatically reconciled and marked as failed with descriptive errors.
+PostgreSQL migrations are executed idempotently upon orchestrator boot via `src/migrate.ts`. Pipeline recovery is coordinated by `src/index.ts`:
+- `jobs.payload` preserves the latest completed stage output across process restarts.
+- Existing BullMQ jobs are preserved so BullMQ can resume stalled or queued work.
+- If a required stage is missing from Redis, it is reconstructed from the source video or the persisted payload and re-enqueued with a deterministic stage ID.
+- Queue jobs that completed or failed before their database state was written are reconciled on startup.
+- A pipeline is marked as failed only when a stage actually failed or recovery requires a payload that is unavailable.
 - Granular tracking is recorded across `jobs`, `job_stages`, `speakers`, and `segments`.
 
 ---
