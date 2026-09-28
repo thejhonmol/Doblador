@@ -16,20 +16,26 @@ flowchart TD
         Extract --> Demucs["Demucs (htdemucs)\nSource Separation: Vocals vs Instrumental"]
         Extract --> STT["MOSS / Whisper + Sortformer\nTranscription + Speaker Diarization"]
         Extract --> AgeGender["Wav2Vec2\nDemographic Classification: Age & Gender"]
+        Extract --> SER["Whisper-Large-v3 SER\nSpeech Emotion Recognition (7 classes)"]
         Demucs --> LUFS["pyloudnorm\nOriginal LUFS Loudness per Speaker"]
     end
 
-    STT --> Translate[2. Script Translation & Adaptation]
+    STT --> Translate[2. 3-Phase Script Translation]
 
-    subgraph TranslateWorker["Stage 2: Translate Worker (Gemini API)"]
-        Translate --> Gemini["Gemini Flash (Fallback Chain: 3.7 -> 3.5 -> 3.8 -> 3.1)\n- Global video context awareness\n- DNT rules & cultural preservation\n- Textual expansion for numbers & dates"]
+    subgraph TranslateWorker["Stage 2: Translate Worker (Gemini API — 3 Phases)"]
+        Translate --> Phase1["Phase 1: Context Discovery\nDomain detection, DNT glossary, ASR error correction"]
+        Phase1 --> Phase2["Phase 2: Batch Translation\nGlossary-injected dubbing with emotion metadata"]
+        Phase2 --> Phase3["Phase 3: QA Audit\nDetect untranslated words, hallucinations, unspeakable elements"]
     end
 
-    Gemini --> TTS[3. Parallel Voice Synthesis]
+    Phase3 --> TTS[3. Parallel Voice Synthesis]
 
     subgraph TTSWorker["Stage 3: TTS Worker (Fish Audio Multi-Key)"]
-        TTS --> VoiceAlloc["Voice allocation per demographic profile\n(male_young, male_mature, female_young, female_mature, child)"]
-        VoiceAlloc --> FishParallel["Parallel synthesis (up to 3 API keys)\n+ Automatic exponential backoff failover"]
+        TTS --> VoiceMode{"Voice Mode?"}
+        VoiceMode -->|clone| InlineClone["In-flight Zero-Shot Cloning\nMsgPack reference from Demucs vocals"]
+        VoiceMode -->|preset| VoiceAlloc["Catalog voice allocation per demographic\n(male_young, male_mature, female_young, female_mature, child)"]
+        InlineClone --> FishParallel["Parallel synthesis (up to 3 API keys)\n+ Automatic exponential backoff failover"]
+        VoiceAlloc --> FishParallel
         FishParallel --> NormLUFS["Loudness calibration (pyloudnorm)\nMatches original speaker LUFS profile"]
     end
 
@@ -108,10 +114,30 @@ Places each synthesized TTS segment at its **original timestamp**, solving voice
 - Measures integrated LUFS of the original vocal track for each speaker using ITU-R BS.1770-4.
 - Individually gains each generated TTS clip so that dubbed dialogue matches the exact perceptual loudness of the original actor.
 
-### 6. Script Translation with Cultural Preservation & Text Expansion
-- **Do Not Translate (DNT)**: Brand names, software engines ("Unreal Engine"), hardware models, usernames, and proper nouns remain unchanged.
-- **Full Textual Expansion**: Numbers, dates, percentages, and currencies are expanded into written words ("twenty-five percent", "three thousand one hundred") to prevent TTS engines from mispronouncing abbreviations or series of numbers.
-- **Resilient Fallback Chain**: Automatically degrades through `gemini-3.7-flash` ➔ `gemini-3.5-flash` ➔ `gemini-3.8-flash` ➔ `gemini-3.1-flash-lite` ➔ `gemini-flash-latest`.
+### 6. 3-Phase Intelligent Translation Pipeline
+The translate worker implements a sophisticated 3-phase architecture that dramatically improves translation quality over single-pass approaches:
+
+- **Phase 1 — Context Discovery**: Before translating a single word, a dedicated Gemini call analyzes the full transcript to extract:
+  - **Domain & Tone Detection**: Identifies the video's subject (gaming, tech, cooking, legal, etc.) and communication style (formal, comedic, energetic).
+  - **DNT Glossary**: Builds a Do-Not-Translate glossary of brand names, technical terms, proper nouns, and cultural expressions with exact handling instructions (`KEEP_ORIGINAL` or `TRANSLATE_CONSISTENTLY`).
+  - **ASR Error Correction**: Detects likely Whisper/MOSS transcription hallucinations (background noise misheard as words, broken idioms) and provides compensation rules for downstream translation.
+
+- **Phase 2 — Glossary-Injected Batch Translation**: Segments are translated in batches of 35 with the Phase 1 glossary, ASR corrections, and detected domain/tone injected directly into the system instruction. Emotion metadata from Whisper-Large-v3 SER guides cadence and vocabulary choices.
+  - **Full Textual Expansion**: Numbers, dates, percentages, and currencies are expanded into spoken words to prevent TTS mispronunciation.
+  - **Resilient Fallback Chain**: Automatically degrades through `gemini-3.7-flash` ➔ `gemini-3.5-flash` ➔ `gemini-3.8-flash` ➔ `gemini-3.1-flash-lite` ➔ `gemini-flash-latest`.
+
+- **Phase 3 — QA Audit**: A post-translation quality assurance pass reviews every translated segment against the original, detecting and auto-correcting:
+  - Common vocabulary accidentally left untranslated.
+  - Hallucinated or out-of-context words injected by the LLM.
+  - Numbers or symbols not spelled out in full letters.
+  - Unnecessarily wordy translations that break dubbing rhythm.
+
+- **Graceful Degradation**: Phases 1 and 3 are fault-tolerant — if Gemini fails during context discovery or QA audit, the pipeline continues with neutral defaults instead of blocking the entire job.
+
+### 7. In-Flight Zero-Shot Voice Cloning (Fish Audio MsgPack)
+- When voice mode is set to `clone` (the default), the TTS worker extracts the clearest speech slice (≥ 1.5s) from each speaker's Demucs-isolated vocals.
+- The extracted audio is sent inline as a binary MsgPack reference to Fish Audio's `s2.1-pro-free` engine, producing a zero-shot voice clone without pre-training a custom model.
+- Falls back automatically to catalog preset voices if the speaker's vocal sample is too short or extraction fails.
 
 ---
 
@@ -141,8 +167,8 @@ Doblador/
 │   │   ├── persist.ts       # Database persistence for segments and speaker mapping
 │   │   └── workers/
 │   │       ├── extract.ts   # Audio extraction, Demucs, STT, diarization, duration probing
-│   │       ├── translate.ts # Script adaptation with Gemini (DNT, number expansion, batching)
-│   │       ├── tts.ts       # Multi-key synthesis, demographic assignment, LUFS calibration
+│   │       ├── translate.ts # 3-phase translation: context discovery → glossary translation → QA audit
+│   │       ├── tts.ts       # Multi-key synthesis, voice cloning, demographic assignment, LUFS calibration
 │   │       ├── stitch.ts    # Client for /stitch-tts continuous speech generation
 │   │       └── assemble.ts  # FFmpeg assembly mixing speech with clean background
 │   └── .env.example         # Orchestrator environment template
@@ -250,7 +276,9 @@ PostgreSQL migrations are executed idempotently upon orchestrator boot via `src/
 ## 📌 Troubleshooting
 
 - **`ECONNREFUSED 127.0.0.1:8000`**: Heavy AI models take 10–15 seconds to load into GPU VRAM on startup. `start_system.bat` polls health automatically before launching subsequent services.
-- **Gemini Rate Limits (HTTP 429/503)**: The translation worker enforces rate limiting (10 calls/min) and degrades automatically across alternative Flash models (`gemini-3.7` ➔ `3.5` ➔ `3.8` ➔ `3.1`).
+- **Gemini Rate Limits (HTTP 429/503)**: The translation worker enforces rate limiting (5 jobs/min, adjusted for 3-phase API call volume) and degrades automatically across alternative Flash models (`gemini-3.7` ➔ `3.5` ➔ `3.8` ➔ `3.1`).
+- **Fish Audio Insufficient Credit (HTTP 402)**: The TTS worker detects exhausted API keys and fails the job explicitly with a descriptive error instead of producing a silent video. Rotate or recharge your Fish Audio keys to resolve.
+- **cuDNN Crashes on Windows**: If you encounter `cudnnGetLibConfig` errors (Code 127), the system automatically disables cuDNN dynamic symbol lookup. This is handled in `python-services/main.py` at startup.
 - **Voice Collision / Overlap**: Handled by the 4-layer `/stitch-tts` DSP engine. The single-mouth rule enforces a minimum +70 ms breath gap between phrases of the same speaker, while forward-only progressive atempo recovers drift without destructive backward snaps.
 - **Output Video Duration**: The orchestrator probes source video duration using `ffprobe` and clamps the audio mix using `apad,atrim` to match the exact container length.
 
