@@ -147,8 +147,6 @@ The translate worker implements a sophisticated 3-phase architecture that dramat
 Doblador/
 ├── start_system.bat         # Automated one-click startup script with health polling
 ├── stop_system.bat          # Clean shutdown script releasing ports and Docker
-├── iniciar_sistema.bat      # Backward-compatible alias to start_system.bat
-├── detener_sistema.bat      # Backward-compatible alias to stop_system.bat
 ├── docker-compose.yml       # Supporting services: PostgreSQL 15 + Redis 7
 ├── init.sql                 # Relational database schema (jobs, stages, speakers, segments)
 ├── .env.example             # Global environment configuration template
