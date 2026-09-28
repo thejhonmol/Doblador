@@ -177,8 +177,7 @@ Doblador/
 │   └── venv/                # Virtual environment with CUDA/Vulkan support
 │
 └── scripts/
-    ├── prepare_ports.ps1    # Safe port cleanup script using HTTP signatures
-    └── preparar_puertos.ps1 # Backward-compatible alias to prepare_ports.ps1
+    └── prepare_ports.ps1    # Safe port cleanup script using HTTP signatures
 ```
 
 ---

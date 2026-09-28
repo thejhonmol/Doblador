@@ -226,7 +226,7 @@ app.get('/api/jobs/:id/download', async (req, res) => {
 /**
  * GET /api/health
  *
- * Also the signature used by scripts/preparar_puertos.ps1 to tell "our own previous
+ * Also the signature used by scripts/prepare_ports.ps1 to tell "our own previous
  * instance" apart from an unrelated process squatting on the port. Guessing by image
  * name was not good enough: any other Node server on port 3000 would have been
  * silently killed.
