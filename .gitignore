@@ -16,6 +16,10 @@ orchestrator/src/**/*.js
 orchestrator/src/**/*.js.map
 orchestrator/src/**/*.d.ts
 orchestrator/src/**/*.d.ts.map
+orchestrator/test/**/*.js
+orchestrator/test/**/*.js.map
+orchestrator/test/**/*.d.ts
+orchestrator/test/**/*.d.ts.map
 *.tsbuildinfo
 
 # Pipeline media artifacts: source videos, extracted WAVs, Demucs stems, TTS clips, final MP4s
