@@ -1,6 +1,7 @@
 import { Worker, Job } from 'bullmq';
 import { GoogleGenAI, Type } from '@google/genai';
-import { redisConnection, GEMINI_API_KEY } from '../config';
+import axios from 'axios';
+import { redisConnection, GEMINI_API_KEY, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL } from '../config';
 import { normalizeContextDiscovery, syllableBudget } from '../pipeline-policy';
 
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
@@ -83,9 +84,55 @@ function isSpeakable(text: string): boolean {
     return (text || '').replace(/[^\p{L}\p{N}]/gu, '').length >= 3;
 }
 
-// Generic Gemini caller that walks the MODEL_FALLBACK_CHAIN for any schema
-async function callGeminiWithFallback<T>(systemInstruction: string, prompt: string, schema: any): Promise<T> {
+function openAICompatibleUrl(): string {
+    return /\/chat\/completions$/i.test(LLM_BASE_URL) ? LLM_BASE_URL : `${LLM_BASE_URL}/chat/completions`;
+}
+
+async function callOpenAICompatible<T>(systemInstruction: string, prompt: string): Promise<T> {
+    if (!LLM_BASE_URL || !LLM_API_KEY || !LLM_MODEL) throw new Error('OpenAI-compatible LLM endpoint is not fully configured.');
+    const payload: any = {
+        model: LLM_MODEL,
+        messages: [
+            { role: 'system', content: `${systemInstruction}\nReturn only valid JSON matching the requested output structure.` },
+            { role: 'user', content: prompt },
+        ],
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+    };
+    const requestConfig = {
+        headers: { Authorization: `Bearer ${LLM_API_KEY}`, 'Content-Type': 'application/json' },
+        timeout: 120000,
+        maxContentLength: 8 * 1024 * 1024,
+    };
+    let response;
+    try {
+        response = await axios.post(openAICompatibleUrl(), payload, requestConfig);
+    } catch (err: any) {
+        // Some OpenAI-compatible servers implement chat/completions but not
+        // response_format. Retry once without that optional field before falling back.
+        if (err?.response?.status !== 400) throw err;
+        const { response_format: _ignored, ...compatiblePayload } = payload;
+        response = await axios.post(openAICompatibleUrl(), compatiblePayload, requestConfig);
+    }
+    const raw = response.data?.choices?.[0]?.message?.content;
+    if (typeof raw !== 'string' || !raw.trim()) throw new Error('OpenAI-compatible endpoint returned no message content.');
+    const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    return JSON.parse(cleaned) as T;
+}
+
+// Uses the configured OpenAI-compatible endpoint first, then walks the Gemini fallback
+// chain. This preserves the existing provider while allowing Modal/DeepSeek deployments.
+async function callModelWithFallback<T>(systemInstruction: string, prompt: string, schema: any): Promise<T> {
     let lastErr: any = null;
+
+    if (LLM_BASE_URL && LLM_API_KEY && LLM_MODEL) {
+        try {
+            return await callOpenAICompatible<T>(systemInstruction, prompt);
+        } catch (err: any) {
+            lastErr = err;
+            console.warn(`[Translate] Primary OpenAI-compatible model '${LLM_MODEL}' failed protocol/request validation: ${err.message}. Falling back to Gemini.`);
+        }
+    }
 
     for (const model of MODEL_FALLBACK_CHAIN) {
         try {
@@ -111,7 +158,7 @@ async function callGeminiWithFallback<T>(systemInstruction: string, prompt: stri
         }
     }
 
-    throw lastErr || new Error('All configured Gemini models failed to process request.');
+    throw lastErr || new Error('All configured translation models failed to process request.');
 }
 
 // ---------- PHASE 1: Universal Context Analysis & Pre-Translation Glossary ----------
@@ -163,7 +210,7 @@ Your objectives:
     };
 
     try {
-        const result = await callGeminiWithFallback<ContextDiscovery>(
+        const result = await callModelWithFallback<ContextDiscovery>(
             systemInstruction,
             `Complete video transcript for analysis:\n"""${fullTranscript}"""`,
             schema
@@ -278,7 +325,7 @@ ${JSON.stringify(segmentsToAudit, null, 2)}
 `;
 
     try {
-        const result = await callGeminiWithFallback<AuditCorrectionResponse>(systemInstruction, prompt, schema);
+        const result = await callModelWithFallback<AuditCorrectionResponse>(systemInstruction, prompt, schema);
         const map = new Map<number, string>();
         if (result?.corrections) {
             for (const item of result.corrections) {
@@ -360,7 +407,7 @@ ${JSON.stringify(segmentsPayload, null, 2)}
                 required: ['segments'],
             };
 
-            const batchRes = await callGeminiWithFallback<{ segments: TranslationResultItem[] }>(
+            const batchRes = await callModelWithFallback<{ segments: TranslationResultItem[] }>(
                 systemInstruction,
                 prompt,
                 batchSchema

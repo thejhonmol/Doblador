@@ -12,8 +12,8 @@ High-performance service built with **FastAPI** hosting GPU-accelerated deep lea
 ## 🎛️ Digital Signal Processing (DSP)
 - **`pyloudnorm`**: ITU-R BS.1770-4 loudness measurement and calibration per speaker.
 - **`librosa`**: Energy-based dynamic VAD trimming (`top_db=25`).
-- **FFmpeg `atempo`**: Pitch-preserving speech time-stretching, bounded to 0.92x-1.25x.
-- **`scipy` / `numpy`**: Anti-aliased multi-rate resampling, soft-knee bus limiting, strict per-speaker non-collision stitching, 250 ms cross-speaker overlap and 900 ms drift gates (`/stitch-tts`).
+- **FFmpeg `atempo`**: Chained, pitch-preserving acceleration at whatever speed is needed to fit each dialogue window. Short takes keep their speed and trailing pause.
+- **`scipy` / `numpy`**: Sample-exact duration fitting, multi-rate resampling, soft-knee bus limiting, same-speaker scheduling and source cross-speaker overlaps (`/stitch-tts`). Extreme ratios or FFmpeg overshoot can use whole-clip resampling, which may change pitch. Timing metrics do not reject jobs.
 
 Both transcription paths return word timestamps. MOSS remains authoritative for text
 and speakers, while faster-whisper supplies its forced word-alignment pass.
@@ -27,3 +27,12 @@ and speakers, while faster-whisper supplies its forced word-alignment pass.
 python -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 API root endpoint: `http://127.0.0.1:8000/`.
+
+## Timing regression tests
+
+Run from `python-services` with NumPy, SciPy and FFmpeg installed; no GPU models or
+provider API calls are needed:
+
+```bash
+python -m unittest -v test_audio_timing
+```

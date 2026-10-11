@@ -24,3 +24,9 @@ export const FISH_AUDIO_API_KEYS: string[] = rawFishKeys
 export const FISH_AUDIO_API_KEY = FISH_AUDIO_API_KEYS[0] || '';
 export const PYTHON_SERVICES_URL = process.env.PYTHON_SERVICES_URL || 'http://localhost:8000';
 
+// Optional OpenAI-compatible translation endpoint (for example the user's Modal
+// DeepSeek Flash deployment). When omitted, translation uses Gemini directly.
+export const LLM_BASE_URL = (process.env.LLM_BASE_URL || '').trim().replace(/\/+$/, '');
+export const LLM_API_KEY = (process.env.LLM_API_KEY || '').trim();
+export const LLM_MODEL = (process.env.LLM_MODEL || '').trim();
+

@@ -36,18 +36,16 @@ flowchart TD
         VoiceMode -->|preset| VoiceAlloc["Catalog voice allocation per demographic\n(male_young, male_mature, female_young, female_mature, child)"]
         InlineClone --> FishParallel["Parallel synthesis (up to 3 API keys)\n+ Automatic exponential backoff failover"]
         VoiceAlloc --> FishParallel
-        FishParallel --> DurationQA["Duration QA + one semantic rewrite/regeneration\n0.75-1.18 target band; 1.25x hard ceiling"]
-        DurationQA --> NormLUFS["Loudness calibration (pyloudnorm)\nMatches original speaker LUFS profile"]
+        FishParallel --> NormLUFS["Loudness calibration (pyloudnorm)\nMatches original speaker LUFS profile"]
     end
 
-    NormLUFS --> Stitch[4. Anti-Collision Audio Stitching]
+    NormLUFS --> Stitch[4. Automatic Timing Adjustment]
 
-    subgraph StitchTTS["Stage 4: /stitch-tts (4-Layer Python DSP Engine)"]
-        Stitch --> L1["Layer 1: Dynamic Energy VAD Trim (librosa)"]
-        L1 --> L3["Layer 3: Single-Mouth Rule (+70ms breath gap)"]
-        L3 --> L4["Layer 4: Forward-Only Progressive Drift Recovery"]
-        L4 --> L2["Layer 2: Pitch-Preserving FFmpeg atempo\n0.92x-1.25x"]
-        L2 --> Bus["Additive audio summing bus + soft limiter"]
+    subgraph StitchTTS["Stage 4: /stitch-tts (Automatic Audio Fitting)"]
+        Stitch --> L1["Dynamic Energy VAD Trim (librosa)"]
+        L1 --> Slots["Source time windows\nNext same-speaker start and video boundary"]
+        Slots --> Fit["Chained FFmpeg atempo\nAccelerate as needed"]
+        Fit --> Bus["Sample-exact fit + additive audio summing bus + soft limiter"]
         Bus --> SingleTrack["Pre-stitched continuous audio track (_tts_full.wav)"]
     end
 
@@ -81,19 +79,19 @@ flowchart TD
 
 ## ⚡ Core Engineering Innovations
 
-### 1. 4-Layer Anti-Collision Audio Stitcher (`/stitch-tts`)
-Places each synthesized TTS segment at its **original timestamp**, solving voice overlaps and cumulative timing drift:
-- **Layer 1 (Dynamic VAD Trim)**: Identifies precise speech boundaries using `librosa.effects.trim(top_db=25)` to eliminate variable TTS padding without clipping words.
-- **Layer 2 (Speech Time-Stretch)**: FFmpeg `atempo` adapts clip length while preserving pitch. Routine adjustment is kept inside approximately **0.92x-1.18x**, with an absolute **1.25x** ceiling.
-- **Layer 3 (Strict Collision Rules)**: Every speaker is tracked independently and receives a **+70 ms** gap. Cross-speaker overlap is preserved only when it existed in the source and is capped at **250 ms**; a long TTS take cannot create a new interruption.
-- **Layer 4 (Forward-Only Drift Recovery)**: Drift is never recovered by snapping timestamps backward. Subsequent clips can be accelerated up to **1.25x**; a maximum start drift above **900 ms** rejects the stage.
+### 1. Automatic Audio Fitting (`/stitch-tts`)
+Places synthesized TTS on the source timeline while preserving complete takes:
+- **Dynamic VAD Trim**: `librosa.effects.trim(top_db=25)` removes leading/trailing generation padding before fitting.
+- **Source time windows**: Each take is bounded by its original end, the next start for the same speaker and the video boundary. Different speakers retain the overlap already present in the source.
+- **Automatic acceleration**: Chained FFmpeg `atempo` filters accelerate long takes by the ratio required to fit the window. Timing ratio alone does not reject or regenerate the segment.
+- **Complete-take fitting**: Residual FFmpeg overshoot is resampled to the available sample count instead of cutting the tail. Extreme fallback resampling can affect pitch or intelligibility and is reported for review.
 - **Additive Bus with Soft-Knee Limiter**: Segments are summed onto the bus (`+=`). Peaks exceeding the knee (0.80) are smoothly compressed via `tanh` up to 0.98, leaving the rest of the audio bit-identical.
 
-### 2. Duration-Aware Translation and Two-Pass TTS
+### 2. Duration-Aware Translation and Single-Pass TTS
 - Whisper produces word timestamps directly. The MOSS path keeps MOSS transcription/diarization and adds a Whisper word-alignment pass.
 - Gemini receives the exact slot duration plus target/minimum/maximum syllable budgets for every segment.
-- Generated speech is measured after synthesis. Ratios above **1.18x** or below **0.75x** trigger one meaning-preserving rewrite and TTS regeneration.
-- A second result above **1.25x** fails the job instead of being rushed or clipped. Short results keep a natural pause and are expanded no further than **0.92x**.
+- Generated speech is measured after synthesis and fitted to its source timing window by the DSP stage. Duration alone does not trigger a second TTS request.
+- Long takes are accelerated as needed without a hard speed ceiling or tail clipping. Short takes keep their natural speed and leave the remaining slot as silence.
 - Successful stitching stores a per-segment synchronization report in PostgreSQL and exposes it in the UI as a downloadable JSON file.
 
 ### 3. Speech Emotion Recognition & Expressive Translation (Whisper-Large-v3 SER)
@@ -251,6 +249,13 @@ From `orchestrator/`, run `npm test`. The regression suite covers Fish Audio
 credential failover policy, incomplete-dialogue rejection, optional Gemini fields,
 and recovery-stage selection after a restart.
 
+### Beta infrastructure
+
+For reproducible PostgreSQL/Redis health checks, the local same-origin edge
+(`/`, `/app/`, `/api/v1/`) and the optional NVIDIA Python container profile, see
+[`BETA_DEPLOYMENT.md`](BETA_DEPLOYMENT.md). The base Compose remains usable without
+provider API credentials.
+
 ### Stopping the System
 To shut down all services cleanly:
 ```cmd
@@ -270,7 +275,7 @@ stop_system.bat
 | `POST` | `/separate` | `file`, `output_background_path`, `output_vocals_path`, `timeout_sec?` | Demucs stem separation and original vocals LUFS measurement |
 | `POST` | `/measure-speakers-loudness`| `vocals_path`, `segments_json` | Measures individual LUFS for each detected speaker |
 | `POST` | `/normalize-tts` | `output_dir`, `target_lufs`, `speakers_lufs_json`, `segments_json` | Loudness calibration per speaker using pyloudnorm |
-| `POST` | `/stitch-tts` | `segments_json`, `total_duration_sec`, `output_path` | Strict DSP stitching, timing quality gate, and detailed synchronization report |
+| `POST` | `/stitch-tts` | `segments_json`, `total_duration_sec`, `output_path` | Automatic complete-take fitting plus a diagnostic synchronization report |
 
 ### Node.js Orchestrator API (`http://127.0.0.1:3000`)
 
@@ -303,7 +308,7 @@ PostgreSQL migrations are executed idempotently upon orchestrator boot via `src/
 - **Gemini Rate Limits (HTTP 429/503)**: The translation worker enforces rate limiting (5 jobs/min, adjusted for 3-phase API call volume) and degrades automatically across alternative Flash models (`gemini-3.7` ➔ `3.5` ➔ `3.8` ➔ `3.1`).
 - **Fish Audio Insufficient Credit (HTTP 402)**: The TTS worker detects exhausted API keys and fails the job explicitly with a descriptive error instead of producing a silent video. Rotate or recharge your Fish Audio keys to resolve.
 - **cuDNN Crashes on Windows**: If you encounter `cudnnGetLibConfig` errors (Code 127), the system automatically disables cuDNN dynamic symbol lookup. This is handled in `python-services/main.py` at startup.
-- **Synchronization quality gate failed**: Inspect the stage error for the segment, drift or video-boundary violation. The system intentionally does not fall back to raw `adelay`, because that would bypass collision and clipping checks.
+- **Audio stitching failed**: Inspect the reported segment for missing/corrupt audio or an FFmpeg processing error. Timing ratios are diagnostic; generated speech is fitted automatically rather than regenerated because of duration.
 - **Output Video Duration**: The orchestrator probes source video duration using `ffprobe` and clamps the audio mix using `apad,atrim` to match the exact container length.
 
 ---

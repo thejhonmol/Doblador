@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
     assertSpeechSynthesisComplete,
-    durationAction,
     nextIncompleteStage,
     normalizeContextDiscovery,
     syllableBudget,
@@ -44,16 +43,6 @@ test('recovery resumes at the first incomplete pipeline stage', () => {
     assert.equal(nextIncompleteStage(['extract']), 'translate');
     assert.equal(nextIncompleteStage(['extract', 'translate', 'tts']), 'assemble');
     assert.equal(nextIncompleteStage(['extract', 'translate', 'tts', 'assemble']), null);
-});
-
-test('duration policy rewrites outliers once and enforces the hard ceiling', () => {
-    assert.equal(durationAction(0.70), 'rewrite-longer');
-    assert.equal(durationAction(0.70, 1), 'accept');
-    assert.equal(durationAction(1.05), 'accept');
-    assert.equal(durationAction(1.12), 'compress');
-    assert.equal(durationAction(1.22), 'rewrite-shorter');
-    assert.equal(durationAction(1.22, 1), 'compress');
-    assert.equal(durationAction(1.26, 1), 'fail');
 });
 
 test('syllable budget is explicit and safe when timestamps are unavailable', () => {
