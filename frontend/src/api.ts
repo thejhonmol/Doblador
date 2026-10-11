@@ -38,8 +38,12 @@ export async function login(email: string, password: string): Promise<AuthSessio
   return normalizeSession(data);
 }
 
-export async function register(email: string, password: string): Promise<AuthSession> {
-  const { data } = await client.post('/auth/register', { email, password });
+export async function register(email: string, password: string, inviteCode?: string): Promise<AuthSession> {
+  const { data } = await client.post('/auth/register', {
+    email,
+    password,
+    ...(inviteCode?.trim() ? { inviteCode: inviteCode.trim() } : {}),
+  });
   return normalizeSession(data);
 }
 

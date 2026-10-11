@@ -61,9 +61,8 @@ services:
       start_period: 180s
     restart: unless-stopped
 
-  # Local same-origin edge. It serves the ZhowPlus landing and proxies the native
-  # Vite/Express processes so /, /app/ and /api/v1/ can be exercised through one
-  # origin before production deployment.
+  # Local same-origin edge. It serves the bundled ZhowPlus static site (including
+  # the React app under /app/) and proxies only /api/v1/ to the native Express API.
   edge:
     profiles: ["edge"]
     image: nginx:1.28.0-alpine
@@ -72,7 +71,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ${ZHOWPLUS_LANDING_PATH:-../zhowplus}:/srv/zhowplus:ro
+      - ${ZHOWPLUS_LANDING_PATH:-../zhowplus/dist}:/srv/zhowplus:ro
       - ./scripts/infra/nginx.local.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -q ok"]

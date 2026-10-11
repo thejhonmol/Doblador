@@ -21,6 +21,10 @@ const LANG_OPTIONS = [
   ['it', 'Italiano'], ['pt', 'Português'], ['ja', '日本語'], ['zh', '中文'],
 ];
 const STAGES = ['extract', 'translate', 'tts', 'assemble'] as const;
+const configuredPasswordMinimum = Number(import.meta.env.VITE_MIN_PASSWORD_LENGTH);
+const MIN_PASSWORD_LENGTH = Number.isInteger(configuredPasswordMinimum) && configuredPasswordMinimum > 0
+  ? configuredPasswordMinimum
+  : 12;
 
 function formatDate(value?: string, locale: Locale = 'es') {
   if (!value) return '—';
@@ -114,6 +118,7 @@ function AuthView({ locale, onLocale, onSession }: { locale: Locale; onLocale: (
   const [mode, setMode] = useState<'login' | 'register'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const t = (key: TranslationKey) => translate(locale, key);
@@ -121,7 +126,9 @@ function AuthView({ locale, onLocale, onSession }: { locale: Locale; onLocale: (
   const submit = async (event: React.FormEvent) => {
     event.preventDefault(); setBusy(true); setError(null);
     try {
-      const session = mode === 'login' ? await login(email.trim(), password) : await register(email.trim(), password);
+      const session = mode === 'login'
+        ? await login(email.trim(), password)
+        : await register(email.trim(), password, inviteCode);
       onSession(session);
     } catch (err) {
       setError(isNetworkError(err) ? t('networkError') : apiErrorMessage(err) || (mode === 'login' ? t('invalidCredentials') : t('genericError')));
@@ -137,7 +144,18 @@ function AuthView({ locale, onLocale, onSession }: { locale: Locale; onLocale: (
       <p>{t(mode === 'login' ? 'loginSubtitle' : 'registerSubtitle')}</p>
       <form onSubmit={submit}>
         <Field label={t('email')} type="email" value={email} onChange={setEmail} autoComplete="email" required />
-        <Field label={t('password')} type="password" value={password} onChange={setPassword} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={8} />
+        <Field
+          label={t('password')}
+          type="password"
+          value={password}
+          onChange={setPassword}
+          autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+          required
+          minLength={mode === 'register' ? MIN_PASSWORD_LENGTH : undefined}
+          aria-describedby={mode === 'register' ? 'password-minimum' : undefined}
+        />
+        {mode === 'register' && <span className="muted" id="password-minimum">{t('passwordMinimum')}: {MIN_PASSWORD_LENGTH}</span>}
+        {mode === 'register' && <Field label={t('inviteCode')} value={inviteCode} onChange={setInviteCode} autoComplete="off" placeholder={t('inviteCodeOptional')} />}
         {error && <ErrorBox message={error} />}
         <button className="primary-btn" disabled={busy}>{busy && <Loader2 className="spin" size={18} />}{t(busy ? (mode === 'login' ? 'loggingIn' : 'registering') : mode)}</button>
       </form>

@@ -16,10 +16,14 @@ The public deployment is expected to use one HTTPS origin:
 | `/api/v1/` | Express orchestrator; the edge preserves the full `/api/v1/...` URI |
 
 `scripts/infra/nginx.local.conf` implements that contract for local verification.
-Both proxy locations preserve their path prefixes: `/api/v1/...` reaches the Express
-routes unchanged, and `/app/...` reaches Vite unchanged so its configured `/app/`
-base keeps asset and HMR URLs valid. The production reverse proxy can use the same
-routing rules after TLS and the real hostnames are configured.
+`/api/v1/...` reaches the Express routes unchanged. `/app/...` is served directly from
+the bundled static site at `zhowplus/dist/app/`, with SPA fallback to
+`/app/index.html`. No Vite development server or WebSocket proxy is required by the
+edge. The production reverse proxy can use the same routing rules after TLS and the
+real hostnames are configured.
+
+The local edge caps request bodies at **250 MB**, matching the beta API upload cap so
+oversized uploads are rejected before they consume backend bandwidth.
 
 The current frontend/orchestrator owners must keep the browser API base compatible
 with `/api/v1/` before production. The local edge is deliberately a routing layer; it
@@ -34,6 +38,13 @@ From the repository root:
 ```powershell
 Copy-Item scripts/infra/.env.compose.example scripts/infra/.env.compose.local
 # Change both local passwords in .env.compose.local.
+
+# Build React, then assemble the complete static ZhowPlus site.
+npm --prefix frontend run build
+python ..\zhowplus\scripts\build_site.py --app-dist frontend\dist --out ..\zhowplus\dist
+
+# The ignored local env must mount the assembled dist directory:
+# ZHOWPLUS_LANDING_PATH=../zhowplus/dist
 docker compose --env-file scripts/infra/.env.compose.local config --quiet
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/infra/verify_local.ps1 -EnvFile scripts/infra/.env.compose.local -WithEdge
 ```
@@ -46,8 +57,9 @@ docker compose --env-file scripts/infra/.env.compose.local ps
 ```
 
 The base Compose starts PostgreSQL and Redis. The `edge` profile additionally starts
-nginx. It expects the ZhowPlus landing repository at `../zhowplus` by default and the
-native React and Express development processes on ports 5173 and 3000.
+nginx. It expects the assembled ZhowPlus site at `../zhowplus/dist` by default. That
+directory contains both the landing files and the React build under `app/`. Only the
+native Express process on port 3000 is proxied; port 5173 is not needed by the edge.
 
 ## 2. Python timing regression test
 
@@ -145,9 +157,9 @@ worker near the shared filesystem is the lower-risk beta architecture.
 
 - Heavy Python model startup can take minutes on a cold machine because model weights
   are loaded before the FastAPI process becomes ready.
-- The optional GPU container has not been runtime-smoke-tested on this workstation
-  when Docker Desktop's Linux engine is stopped. Compose syntax can still be validated
-  without the daemon.
+- The optional GPU container has not been runtime-smoke-tested end to end on this
+  workstation. Its Compose configuration is validated, but the CUDA image and model
+  stack still need a dedicated GPU runtime test before production use.
 - MOSS/Sortformer use `transcribe-cpp` and GPU/Vulkan behavior may differ between the
   native Windows environment and Linux containers; validate transcription quality on
   the exact production GPU before switching the worker to the container profile.
