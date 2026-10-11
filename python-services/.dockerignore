@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+venv/
+.venv/
+.env
+test_*.py
+*.wav
+*.mp3
+*.mp4
+*.mkv
+outputs/
+models/

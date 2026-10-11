@@ -10,6 +10,27 @@ import { query } from './db';
  * safe to run on every start.
  */
 const SCHEMA_STATEMENTS: string[] = [
+    `CREATE TABLE IF NOT EXISTS users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(254) NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        disabled_at TIMESTAMP WITH TIME ZONE
+    )`,
+    `CREATE TABLE IF NOT EXISTS auth_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        token_hash VARCHAR(64) NOT NULL UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS projects (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(120) NOT NULL,
+        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    )`,
     `CREATE TABLE IF NOT EXISTS jobs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         user_id UUID NOT NULL,
@@ -21,6 +42,11 @@ const SCHEMA_STATEMENTS: string[] = [
     `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS payload JSONB`,
     `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
     `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS sync_report JSONB`,
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS project_id UUID REFERENCES projects(id) ON DELETE CASCADE`,
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS original_filename TEXT`,
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`,
+    `ALTER TABLE jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP WITH TIME ZONE`,
+    `ALTER TABLE jobs ALTER COLUMN target_lang TYPE VARCHAR(32)`,
 
     `CREATE TABLE IF NOT EXISTS job_stages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -42,6 +68,7 @@ const SCHEMA_STATEMENTS: string[] = [
         UNIQUE(job_id, speaker_label)
     )`,
     `ALTER TABLE speakers ADD COLUMN IF NOT EXISTS voice_mode VARCHAR(32) DEFAULT 'clone'`,
+    `ALTER TABLE speakers ALTER COLUMN target_lang TYPE VARCHAR(32)`,
 
     `CREATE TABLE IF NOT EXISTS segments (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -83,6 +110,10 @@ const SCHEMA_STATEMENTS: string[] = [
 
     `CREATE INDEX IF NOT EXISTS idx_segments_job ON segments(job_id)`,
     `CREATE INDEX IF NOT EXISTS idx_job_stages_job ON job_stages(job_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_projects_user ON projects(user_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_jobs_user_project ON jobs(user_id, project_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, expires_at)`,
+    `DELETE FROM auth_sessions WHERE expires_at <= NOW()`,
 ];
 
 export async function migrate(): Promise<void> {

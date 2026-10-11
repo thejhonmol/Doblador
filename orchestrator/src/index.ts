@@ -1,8 +1,8 @@
-import { Job, Queue, JobsOptions } from 'bullmq';
-import { redisConnection } from './config';
+import { Job } from 'bullmq';
 import { query } from './db';
 import { migrate } from './migrate';
 import { nextIncompleteStage, PIPELINE_STAGES, PipelineStage } from './pipeline-policy';
+import { enqueueStage, queuesByStage } from './pipeline';
 
 import { extractWorker } from './workers/extract';
 import { translateWorker } from './workers/translate';
@@ -29,43 +29,6 @@ async function waitForDatabase(maxWaitMs = 60000): Promise<void> {
         }
     }
     throw new Error(`PostgreSQL not reachable after ${maxWaitMs}ms: ${lastError}`);
-}
-
-const extractQueue = new Queue('extract', { connection: redisConnection });
-const translateQueue = new Queue('translate', { connection: redisConnection });
-const ttsQueue = new Queue('tts', { connection: redisConnection });
-const assembleQueue = new Queue('assemble', { connection: redisConnection });
-
-// Retry policy per stage. extract and assemble previously called `.add()` with no
-// `attempts`, so a single transient failure killed the whole job while translate
-// got 5 tries and tts got 3.
-const STAGE_ATTEMPTS: Record<PipelineStage, { attempts: number; delay: number }> = {
-    extract: { attempts: 3, delay: 10000 },
-    translate: { attempts: 5, delay: 3000 },
-    tts: { attempts: 3, delay: 2000 },
-    assemble: { attempts: 2, delay: 5000 },
-};
-
-const queuesByStage: Record<PipelineStage, Queue> = {
-    extract: extractQueue,
-    translate: translateQueue,
-    tts: ttsQueue,
-    assemble: assembleQueue,
-};
-
-function stageJobOptions(stage: PipelineStage, pipelineJobId: string): JobsOptions {
-    const policy = STAGE_ATTEMPTS[stage];
-    return {
-        jobId: `${pipelineJobId}-${stage}`,
-        attempts: policy.attempts,
-        backoff: { type: 'exponential', delay: policy.delay },
-    };
-}
-
-async function enqueueStage(stage: PipelineStage, data: any): Promise<void> {
-    const pipelineJobId = data?.jobId;
-    if (!pipelineJobId) throw new Error(`Cannot enqueue '${stage}' without a pipeline jobId.`);
-    await queuesByStage[stage].add(`${stage}-job`, data, stageJobOptions(stage, pipelineJobId));
 }
 
 async function findPipelineJob(stage: PipelineStage, pipelineJobId: string): Promise<Job | undefined> {
@@ -193,11 +156,11 @@ async function updateStage(jobId: string, stage: string, status: string, url: st
 
         // Also update parent job if complete
         if (stage === 'assemble' && status === 'completed') {
-            await query('UPDATE jobs SET status = \'completed\' WHERE id = $1', [jobId]);
+            await query('UPDATE jobs SET status = \'completed\', updated_at = NOW(), completed_at = NOW() WHERE id = $1', [jobId]);
         } else if (status === 'failed') {
-            await query('UPDATE jobs SET status = \'failed\' WHERE id = $1', [jobId]);
+            await query('UPDATE jobs SET status = \'failed\', updated_at = NOW() WHERE id = $1', [jobId]);
         } else {
-            await query('UPDATE jobs SET status = \'processing\' WHERE id = $1 AND status != \'processing\'', [jobId]);
+            await query('UPDATE jobs SET status = \'processing\', updated_at = NOW() WHERE id = $1', [jobId]);
         }
     } catch (e) {
         console.error('DB Update Error:', e);
@@ -291,21 +254,6 @@ assembleWorker.on('completed', async (job, returnvalue) => {
     await updateStage(pJobId, 'assemble', 'completed', returnvalue.finalVideoPath);
 });
 
-// Helper function to trigger a new job (can be attached to an Express API)
-export async function startJob(videoPath: string, targetLang: string, providedJobId?: string, voiceMode: string = 'clone') {
-    const jobId = providedJobId || `job_${Date.now()}`;
-    console.log(`Starting pipeline for ${videoPath} to ${targetLang} (Job: ${jobId}, Voice Mode: ${voiceMode})`);
-
-    await enqueueStage('extract', {
-        videoPath,
-        targetLang,
-        jobId,
-        voiceMode
-    });
-
-    return jobId;
-}
-
 async function bootstrap(): Promise<void> {
     await paused;
     await waitForDatabase();
@@ -333,10 +281,7 @@ async function bootstrap(): Promise<void> {
         console.log(`[Orchestrator] Worker '${name}' listening.`);
     }
 
-    console.log('Orchestrator started. Workers are listening...');
-
-    const { startServer } = await import('./server');
-    startServer(3000);
+    console.log('Orchestrator workers started.');
 }
 
 bootstrap().catch((err) => {

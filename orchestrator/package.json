@@ -5,8 +5,11 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node src/index.js",
-    "dev": "tsc && node src/index.js",
+    "start": "node src/api.js",
+    "start:api": "node src/api.js",
+    "start:workers": "node src/index.js",
+    "dev": "tsc && node src/api.js",
+    "dev:workers": "tsc && node src/index.js",
     "test": "npm run build && node --test test/*.test.js"
   },
   "keywords": [],

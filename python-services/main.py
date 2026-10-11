@@ -25,6 +25,7 @@ import numpy as np
 import soundfile as sf
 import scipy
 import scipy.signal
+from audio_timing import fit_audio_to_samples, plan_timing_slots
 from faster_whisper import WhisperModel
 import transcribe_cpp as tc
 from huggingface_hub import hf_hub_download
@@ -683,45 +684,9 @@ def _trim_silence_dynamic(audio: np.ndarray, sr: int, top_db: float = 25.0) -> n
     return trimmed
 
 
-def _apply_atempo(audio: np.ndarray, sr: int, speed: float) -> np.ndarray:
-    """
-    Speech-oriented, pitch-preserving time-stretch through FFmpeg's atempo filter.
-    It produces fewer phase-vocoder artefacts on dialogue than librosa and FFmpeg is
-    already a hard dependency of this project. Raw float32 pipes avoid temp files.
-    """
-    if abs(speed - 1.0) <= 0.01:
-        return audio
-    if speed < 0.5 or speed > 2.0:
-        raise ValueError(f"Unsupported atempo speed {speed:.3f}")
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-f", "f32le", "-ar", str(sr), "-ac", "1", "-i", "pipe:0",
-        "-filter:a", f"atempo={speed:.6f}",
-        "-f", "f32le", "-ar", str(sr), "-ac", "1", "pipe:1",
-    ]
-    result = subprocess.run(
-        cmd,
-        input=np.asarray(audio, dtype=np.float32).tobytes(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=max(30.0, len(audio) / max(1, sr) * 4.0),
-    )
-    if result.returncode != 0 or not result.stdout:
-        detail = result.stderr.decode("utf-8", errors="replace")[-500:]
-        raise RuntimeError(f"FFmpeg atempo failed: {detail}")
-    return np.frombuffer(result.stdout, dtype=np.float32).copy()
-
-
 # ── Stitch-TTS Configuration ──────────────────────────────────────────────
 STITCH_SR = 44100
-MIN_SAME_SPEAKER_GAP_MS = 70.0   # Physical breath/gap between phrases of the SAME speaker. ZERO overlap allowed!
-MAX_CROSS_SPEAKER_OVERLAP_MS = 250.0 # Natural conversational overlap allowed between DIFFERENT speakers
-MAX_DRIFT_MS = 900.0             # Hard ceiling: above this the job is rejected
-DRIFT_RECOVERY_START_MS = 150.0  # From here, boost atempo to win back time before next sentence
-MAX_ATEMPO_SOFT = 1.18           # Preferred ceiling — natural sounding time-stretch
-MAX_ATEMPO_HARD = 1.25           # Absolute ceiling; larger ratios require TTS regeneration
-MIN_ATEMPO = 0.92                # Do not stretch short speech unnaturally to fill every pause
-TRIM_TOP_DB = 25.0               # Layer 1: librosa trim aggressiveness
+TRIM_TOP_DB = 25.0
 SOFT_LIMIT_CEILING = 0.98
 SOFT_LIMIT_KNEE = 0.80
 
@@ -759,52 +724,40 @@ def stitch_tts(
     total_duration_sec: float = Form(...),
     output_path: str = Form(...)
 ):
-    """Creates a continuous voice track and rejects timing that would be clipped."""
+    """Fits every generated take to the source timeline at any required speed."""
     try:
         segments = json.loads(segments_json)
         if not isinstance(segments, list):
             raise HTTPException(status_code=400, detail="segments_json must be an array")
-        if total_duration_sec <= 0:
-            raise HTTPException(status_code=400, detail="total_duration_sec must be positive")
+        if not math.isfinite(total_duration_sec) or total_duration_sec <= 0:
+            raise HTTPException(status_code=400, detail="total_duration_sec must be finite and positive")
 
         sr = STITCH_SR
         total_samples = int(np.ceil(total_duration_sec * sr))
         total_ms = float(total_duration_sec) * 1000.0
         full_track = np.zeros(total_samples, dtype=np.float32)
-        indexed_segments = sorted(
-            ((i, seg) for i, seg in enumerate(segments)),
-            key=lambda x: float(x[1].get("start_ms", 0) or 0),
-        )
+        try:
+            slots = plan_timing_slots(segments, sr, total_samples)
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid segment timing: {exc}")
 
-        speaker_last_end_ms: dict[str, float] = {}
         placed_intervals = []
         stitch_log = []
         processing_errors = []
         max_start_drift_ms = 0.0
 
-        for pos, (idx, seg) in enumerate(indexed_segments):
+        for slot in slots:
+            idx = slot.segment_index
+            seg = segments[idx]
             audio_url = seg.get("tts_audio_url")
             if not audio_url:
                 processing_errors.append(f"segment {idx} has no tts_audio_url")
                 continue
             try:
                 audio_url = safe_path(str(audio_url), must_exist=True)
-                spk = str(seg.get("speaker_label") or seg.get("speaker") or "SPEAKER_00").strip()
-                original_start_ms = float(seg.get("start_ms", 0) or 0)
-                original_end_ms = float(seg.get("end_ms", original_start_ms + 500) or 0)
-                original_duration_ms = max(100.0, original_end_ms - original_start_ms)
-
-                next_same_speaker_start_ms = None
-                for _, future_seg in indexed_segments[pos + 1:]:
-                    future_spk = str(future_seg.get("speaker_label") or future_seg.get("speaker") or "SPEAKER_00").strip()
-                    if future_spk == spk:
-                        candidate = float(future_seg.get("start_ms", 0) or 0)
-                        if candidate > original_start_ms:
-                            next_same_speaker_start_ms = candidate
-                            break
-                slot_end_ms = original_end_ms
-                if next_same_speaker_start_ms is not None:
-                    slot_end_ms = min(slot_end_ms, next_same_speaker_start_ms - MIN_SAME_SPEAKER_GAP_MS)
+                original_start_ms = slot.original_start_ms
+                original_end_ms = slot.original_end_ms
+                original_duration_ms = original_end_ms - original_start_ms
 
                 data, in_sr = sf.read(audio_url)
                 if len(data.shape) > 1:
@@ -814,74 +767,47 @@ def stitch_tts(
                     data = scipy.signal.resample_poly(data, sr // divisor, in_sr // divisor)
                 data = data.astype(np.float32)
 
-                untrimmed_ms = (len(data) / sr) * 1000.0
+                untrimmed_ms = len(data) / sr * 1000.0
                 data = _trim_silence_dynamic(data, sr, top_db=TRIM_TOP_DB)
-                clip_duration_ms = (len(data) / sr) * 1000.0
-                trimmed_ms = max(0.0, untrimmed_ms - clip_duration_ms)
+                trimmed_ms = max(0.0, untrimmed_ms - len(data) / sr * 1000.0)
+                data, speed, resampled = fit_audio_to_samples(data, sr, slot.end_sample - slot.start_sample)
 
-                # Same-speaker speech is strictly sequential.
-                last_end_this_spk = speaker_last_end_ms.get(spk, 0.0)
-                actual_start_ms = max(
-                    original_start_ms,
-                    last_end_this_spk + MIN_SAME_SPEAKER_GAP_MS if last_end_this_spk > 0 else 0.0,
-                )
-
-                # Different speakers may overlap only when the source already did,
-                # and never by more than the configured 250 ms conversational cap.
-                max_original_overlap_ms = 0.0
-                allowed_cross_overlap_ms = 0.0
-                for prior in placed_intervals:
-                    if prior["speaker"] == spk:
-                        continue
-                    original_overlap_ms = max(0.0, prior["original_end_ms"] - original_start_ms)
-                    allowed_ms = min(MAX_CROSS_SPEAKER_OVERLAP_MS, original_overlap_ms)
-                    max_original_overlap_ms = max(max_original_overlap_ms, original_overlap_ms)
-                    allowed_cross_overlap_ms = max(allowed_cross_overlap_ms, allowed_ms)
-                    actual_start_ms = max(actual_start_ms, prior["actual_end_ms"] - allowed_ms)
-
+                # Fit before mixing: add the complete take, never slice its tail.
+                start_idx = slot.start_sample
+                end_idx = start_idx + len(data)
+                full_track[start_idx:end_idx] += data
+                actual_start_ms = start_idx / sr * 1000.0
+                actual_end_ms = end_idx / sr * 1000.0
                 drift_ms = actual_start_ms - original_start_ms
-                max_start_drift_ms = max(max_start_drift_ms, drift_ms)
-                available_ms = max(200.0, slot_end_ms - actual_start_ms)
-                required_speed = clip_duration_ms / available_ms
-                actions: list[str] = []
-                speed = 1.0
-
-                if required_speed > 1.03:
-                    speed = min(required_speed, MAX_ATEMPO_SOFT)
+                max_start_drift_ms = max(max_start_drift_ms, abs(drift_ms))
+                actions = []
+                if speed > 1.0:
                     actions.append("FIT")
-                elif required_speed < MIN_ATEMPO:
-                    speed = MIN_ATEMPO
-                    actions.append("EXPAND")
+                if resampled:
+                    actions.append("RESAMPLE")
+                if abs(drift_ms) > 1.0:
+                    actions.append("RETIME")
 
-                if drift_ms > DRIFT_RECOVERY_START_MS:
-                    catchup_mult = 1.0 + min(0.25, drift_ms / 2500.0)
-                    boosted = min(max(1.0, speed) * catchup_mult, MAX_ATEMPO_HARD)
-                    if boosted > speed + 0.01:
-                        speed = boosted
-                        actions.append("RECOVER")
-
-                data = _apply_atempo(data, sr, speed)
-                final_clip_ms = (len(data) / sr) * 1000.0
-                actual_end_ms = actual_start_ms + final_clip_ms
-                actual_cross_overlap_ms = max(
-                    [max(0.0, prior["actual_end_ms"] - actual_start_ms)
-                     for prior in placed_intervals if prior["speaker"] != spk] or [0.0]
-                )
-
-                start_idx = max(0, int(round(actual_start_ms * sr / 1000.0)))
-                end_idx = min(total_samples, start_idx + len(data))
-                if end_idx > start_idx:
-                    full_track[start_idx:end_idx] += data[:end_idx - start_idx]
-
-                speaker_last_end_ms[spk] = actual_end_ms
+                original_cross_overlap_ms = max([
+                    max(0.0, min(prior["original_end_ms"], original_end_ms)
+                        - max(prior["original_start_ms"], original_start_ms))
+                    for prior in placed_intervals if prior["speaker"] != slot.speaker
+                ] or [0.0])
+                actual_cross_overlap_ms = max([
+                    max(0.0, min(prior["actual_end_ms"], actual_end_ms)
+                        - max(prior["actual_start_ms"], actual_start_ms))
+                    for prior in placed_intervals if prior["speaker"] != slot.speaker
+                ] or [0.0])
                 placed_intervals.append({
-                    "speaker": spk,
+                    "speaker": slot.speaker,
+                    "original_start_ms": original_start_ms,
                     "original_end_ms": original_end_ms,
+                    "actual_start_ms": actual_start_ms,
                     "actual_end_ms": actual_end_ms,
                 })
                 stitch_log.append({
                     "segment_index": idx,
-                    "speaker": spk,
+                    "speaker": slot.speaker,
                     "original_start_ms": round(original_start_ms, 1),
                     "original_end_ms": round(original_end_ms, 1),
                     "original_duration_ms": round(original_duration_ms, 1),
@@ -893,46 +819,32 @@ def stitch_tts(
                     "speed_used": round(speed, 3),
                     "duration_ratio": round(float(seg.get("duration_ratio") or (untrimmed_ms / original_duration_ms)), 3),
                     "regeneration_count": int(seg.get("regeneration_count") or 0),
-                    "original_cross_overlap_ms": round(max_original_overlap_ms, 1),
-                    "allowed_cross_overlap_ms": round(allowed_cross_overlap_ms, 1),
+                    "original_cross_overlap_ms": round(original_cross_overlap_ms, 1),
+                    "allowed_cross_overlap_ms": round(original_cross_overlap_ms, 1),
                     "actual_cross_overlap_ms": round(actual_cross_overlap_ms, 1),
                     "actions": actions or ["NATURAL"],
-                    "clipped": actual_end_ms > total_ms + 1.0,
+                    "clipped": False,
                 })
             except HTTPException as exc:
                 processing_errors.append(f"segment {idx}: {exc.detail}")
             except Exception as exc:
                 processing_errors.append(f"segment {idx}: {exc}")
 
-        original_end_total = float(indexed_segments[-1][1].get("end_ms") or 0) if indexed_segments else 0.0
-        max_actual_end = max(speaker_last_end_ms.values()) if speaker_last_end_ms else 0.0
+        # Keep real decoding / missing-file failures visible. Timing and speed
+        # are diagnostics only and never reject successfully fitted dialogue.
+        if processing_errors:
+            detail = "; ".join(processing_errors[:12])
+            raise HTTPException(status_code=422, detail=f"Audio stitching failed: {detail}")
+
+        original_end_total = max((slot.original_end_ms for slot in slots), default=0.0)
+        max_actual_end = max((item["actual_end_ms"] for item in placed_intervals), default=0.0)
         tail_delta_ms = max_actual_end - original_end_total
         overrun_ms = max(0.0, max_actual_end - total_ms)
-        recover_count = sum(1 for item in stitch_log if "RECOVER" in item["actions"])
         fit_count = sum(1 for item in stitch_log if "FIT" in item["actions"])
-        expand_count = sum(1 for item in stitch_log if "EXPAND" in item["actions"])
+        retime_count = sum(1 for item in stitch_log if "RETIME" in item["actions"])
+        resample_count = sum(1 for item in stitch_log if "RESAMPLE" in item["actions"])
         natural_count = sum(1 for item in stitch_log if item["actions"] == ["NATURAL"])
         regenerated_count = sum(1 for item in stitch_log if item["regeneration_count"] > 0)
-        clipped_count = sum(1 for item in stitch_log if item["clipped"])
-
-        violations = list(processing_errors)
-        if len(stitch_log) != len(segments):
-            violations.append(f"processed {len(stitch_log)} of {len(segments)} segments")
-        if max_start_drift_ms > MAX_DRIFT_MS:
-            violations.append(f"maximum start drift {max_start_drift_ms:.1f}ms exceeds {MAX_DRIFT_MS:.0f}ms")
-        if overrun_ms > 1.0 or clipped_count > 0:
-            violations.append(f"dialogue would be clipped by {overrun_ms:.1f}ms at the video boundary")
-        for item in stitch_log:
-            if item["actual_cross_overlap_ms"] > item["allowed_cross_overlap_ms"] + 2.0:
-                violations.append(
-                    f"segment {item['segment_index']} cross-speaker overlap "
-                    f"{item['actual_cross_overlap_ms']:.1f}ms exceeds allowed {item['allowed_cross_overlap_ms']:.1f}ms"
-                )
-
-        if violations:
-            detail = "; ".join(violations[:12])
-            print(f"[stitch-tts] Rejected: {detail}")
-            raise HTTPException(status_code=422, detail=f"Synchronization quality gate failed: {detail}")
 
         full_track = _soft_limit(full_track)
         out_abs = safe_path(output_path)
@@ -941,31 +853,35 @@ def stitch_tts(
             os.makedirs(out_dir, exist_ok=True)
         sf.write(out_abs, full_track, sr)
 
-        drift_penalty = min(30.0, (max_start_drift_ms / MAX_DRIFT_MS) * 30.0)
-        speed_penalty = min(20.0, fit_count * 0.75 + recover_count * 1.25 + expand_count * 0.25)
-        rewrite_penalty = min(10.0, regenerated_count * 0.5)
-        score = max(0, min(100, round(100.0 - drift_penalty - speed_penalty - rewrite_penalty)))
+        # Informational score: strong acceleration can sound rushed, but must not
+        # prevent delivery. Average compression avoids penalizing long videos.
+        mean_compression = sum(max(0.0, item["speed_used"] - 1) for item in stitch_log) / max(1, len(stitch_log))
+        speed_penalty = min(40.0, mean_compression * 20.0)
+        drift_penalty = min(30.0, max_start_drift_ms / 1000.0 * 10.0)
+        score = max(0, min(100, round(100.0 - drift_penalty - speed_penalty)))
         grade = "excellent" if score >= 90 else "good" if score >= 80 else "review"
 
         report = {
-            "version": 1,
+            "version": 2,
+            "mode": "auto_fit",
             "score": score,
             "grade": grade,
             "limits": {
-                "max_start_drift_ms": MAX_DRIFT_MS,
-                "max_cross_speaker_overlap_ms": MAX_CROSS_SPEAKER_OVERLAP_MS,
-                "max_speed": MAX_ATEMPO_HARD,
-                "min_speed": MIN_ATEMPO,
+                "max_start_drift_ms": None,
+                "max_cross_speaker_overlap_ms": None,
+                "max_speed": None,
+                "min_speed": 1.0,
             },
             "summary": {
                 "segments_total": len(segments),
                 "segments_processed": len(stitch_log),
                 "natural_segments": natural_count,
                 "compressed_segments": fit_count,
-                "expanded_segments": expand_count,
-                "resynced_segments": recover_count,
+                "expanded_segments": 0,
+                "resynced_segments": retime_count,
+                "resampled_segments": resample_count,
                 "regenerated_segments": regenerated_count,
-                "clipped_segments": clipped_count,
+                "clipped_segments": 0,
                 "max_start_drift_ms": round(max_start_drift_ms, 1),
                 "tail_delta_ms": round(tail_delta_ms, 1),
                 "overrun_ms": round(overrun_ms, 1),
@@ -973,15 +889,15 @@ def stitch_tts(
             "segments": stitch_log,
         }
 
-        print(f"[stitch-tts] Score {score}/100 ({grade}); max drift {max_start_drift_ms:.0f}ms; regenerated {regenerated_count}; clipped 0")
+        print(f"[stitch-tts] Auto-fit complete: {len(stitch_log)} segments; {fit_count} compressed; score {score}/100 ({grade})")
         return {
             "output_path": out_abs,
             "duration_sec": total_duration_sec,
             "segments_processed": len(stitch_log),
             "natural_count": natural_count,
             "compressed_count": fit_count,
-            "expanded_count": expand_count,
-            "resynced_count": recover_count,
+            "expanded_count": 0,
+            "resynced_count": retime_count,
             "max_start_drift_ms": round(max_start_drift_ms, 1),
             "tail_delta_ms": round(tail_delta_ms, 1),
             "overrun_ms": round(overrun_ms, 1),
