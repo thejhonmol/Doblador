@@ -7,7 +7,7 @@ import FormData from 'form-data';
 /**
  * Length of the continuous speech buffer. The source video duration is
  * authoritative. Adding a hidden tail concealed dialogue that would later be cut
- * by the video muxer, so the strict path uses the exact picture duration.
+ * by the video muxer, so automatic fitting uses the exact picture duration.
  */
 export function resolveTrackDurationSec(
     videoDurationSec: number | null | undefined,
@@ -31,8 +31,8 @@ export interface StitchResult {
 
 /**
  * Asks the Python service to stitch the individual TTS clips into one continuous
- * 44.1 kHz track. Synchronization failures are terminal: silently falling back to
- * per-segment adelay would bypass every drift and overlap quality gate.
+ * 44.1 kHz track, fitting long clips to their slots at whatever speed is needed.
+ * Missing audio and processing errors still fail instead of dropping dialogue.
  */
 export async function stitchSegments(
     segments: any[],
@@ -85,6 +85,6 @@ export async function stitchSegments(
         return { outputPath, reportPath, report };
     } catch (err: any) {
         const detail = err?.response?.data?.detail || err?.message || String(err);
-        throw new Error(`${logPrefix} Strict synchronization failed: ${detail}`);
+        throw new Error(`${logPrefix} Audio stitching failed: ${detail}`);
     }
 }

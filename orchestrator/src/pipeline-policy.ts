@@ -59,28 +59,20 @@ export function normalizeContextDiscovery(value: unknown): NormalizedContextDisc
     };
 }
 
-// Shared timing policy. Translation, TTS validation and the stitcher must agree on
-// these limits or a segment accepted by one stage can be rejected by the next.
-export const DURATION_RATIO_MIN = 0.75;
-export const DURATION_RATIO_ACCEPT_MAX = 1.08;
-export const DURATION_RATIO_REWRITE_MAX = 1.18;
-export const DURATION_RATIO_HARD_MAX = 1.25;
-export const MAX_SYNC_DRIFT_MS = 900;
+// Initial translation guidance only; these are not TTS acceptance limits.
+const SYLLABLE_BUDGET_MIN_RATIO = 0.75;
+const SYLLABLE_BUDGET_MAX_RATIO = 1.08;
 
-export type DurationAction = 'accept' | 'compress' | 'rewrite-shorter' | 'rewrite-longer' | 'fail';
+export type DurationAction = 'accept' | 'compress' | 'fail';
 
 /**
- * Chooses what to do after measuring a generated TTS clip against its slot.
- * One semantic rewrite is allowed. A second over-long result may be compressed up
- * to 1.25x; beyond that the job must stop instead of shipping rushed/truncated audio.
+ * Short clips keep their natural pause. Every over-long clip is fitted by the
+ * stitcher, without rewriting dialogue, regenerating TTS or imposing a speed cap.
+ * Only an invalid measurement is a failure.
  */
-export function durationAction(ratio: number, rewrites = 0): DurationAction {
+export function durationAction(ratio: number): DurationAction {
     if (!Number.isFinite(ratio) || ratio <= 0) return 'fail';
-    if (ratio < DURATION_RATIO_MIN) return rewrites === 0 ? 'rewrite-longer' : 'accept';
-    if (ratio <= DURATION_RATIO_ACCEPT_MAX) return 'accept';
-    if (ratio <= DURATION_RATIO_REWRITE_MAX) return 'compress';
-    if (rewrites === 0) return 'rewrite-shorter';
-    return ratio <= DURATION_RATIO_HARD_MAX ? 'compress' : 'fail';
+    return ratio <= 1 ? 'accept' : 'compress';
 }
 
 const SYLLABLES_PER_SECOND: Record<string, number> = {
@@ -105,8 +97,8 @@ export function syllableBudget(durationSec: number | null, language = ''): {
     const target = Math.max(1, Math.round(durationSec * rate));
     return {
         target,
-        min: Math.max(1, Math.floor(target * DURATION_RATIO_MIN)),
-        max: Math.max(1, Math.ceil(target * DURATION_RATIO_ACCEPT_MAX)),
+        min: Math.max(1, Math.floor(target * SYLLABLE_BUDGET_MIN_RATIO)),
+        max: Math.max(1, Math.ceil(target * SYLLABLE_BUDGET_MAX_RATIO)),
     };
 }
 

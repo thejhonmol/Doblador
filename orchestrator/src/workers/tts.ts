@@ -1,5 +1,5 @@
 import { Worker, Job } from 'bullmq';
-import { redisConnection, FISH_AUDIO_API_KEY, FISH_AUDIO_API_KEYS, GEMINI_API_KEY, PYTHON_SERVICES_URL } from '../config';
+import { redisConnection, FISH_AUDIO_API_KEY, FISH_AUDIO_API_KEYS, PYTHON_SERVICES_URL } from '../config';
 import { stitchSegments } from './stitch';
 import { persistSpeakers, persistSegments, persistSyncReport, syncVoicesCatalog } from '../persist';
 import axios from 'axios';
@@ -8,18 +8,14 @@ import path from 'path';
 import FormData from 'form-data';
 import ffmpeg from 'fluent-ffmpeg';
 import { encode } from '@msgpack/msgpack';
-import { GoogleGenAI, Type } from '@google/genai';
 import {
     assertSpeechSynthesisComplete,
     durationAction,
-    syllableBudget,
     ttsFailureAction,
 } from '../pipeline-policy';
 
 // Default reference voice — change this to match your preferred voice from Fish Audio catalog
 const DEFAULT_REFERENCE_ID = '7033e0e6d35e404d81a100701ceca41b';
-const durationRewriteAI = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-const DURATION_REWRITE_MODELS = ['gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-flash-latest'];
 
 /**
  * Worker slots are independent of the number of API keys.
@@ -394,60 +390,6 @@ async function generateWithFailover(
     return false;
 }
 
-/** Rewrites only timing outliers; meaning, names, tone and spoken-number rules stay fixed. */
-async function rewriteTranslationForDuration(
-    text: string,
-    targetLang: string,
-    targetMs: number,
-    measuredMs: number,
-    direction: 'shorter' | 'longer'
-): Promise<string> {
-    const budget = syllableBudget(targetMs / 1000, targetLang);
-    const ratio = measuredMs / targetMs;
-    const systemInstruction = `
-You are a dubbing dialogue editor. Rewrite one already translated line in ${targetLang}
-so its spoken duration is ${direction}, while preserving every fact, name, number,
-emotion and intent. Return plain speakable text: no markdown, notes, URLs or symbols.
-Do not translate proper names that are already preserved.
-`;
-    const prompt = JSON.stringify({
-        current_text: text,
-        measured_duration_ms: Math.round(measuredMs),
-        target_duration_ms: Math.round(targetMs),
-        measured_to_target_ratio: Number(ratio.toFixed(3)),
-        target_syllables: budget.target,
-        min_syllables: budget.min,
-        max_syllables: budget.max,
-        requested_change: direction,
-    });
-    let lastError: any = null;
-    for (const model of DURATION_REWRITE_MODELS) {
-        try {
-            const response = await durationRewriteAI.models.generateContent({
-                model,
-                contents: prompt,
-                config: {
-                    systemInstruction,
-                    responseMimeType: 'application/json',
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: { translated_text: { type: Type.STRING } },
-                        required: ['translated_text'],
-                    },
-                },
-            });
-            const parsed = JSON.parse(response.text || '{}');
-            const rewritten = String(parsed.translated_text || '').trim();
-            if (!rewritten) throw new Error('Gemini returned an empty timing rewrite.');
-            return rewritten;
-        } catch (err: any) {
-            lastError = err;
-            console.warn(`[TTS Duration] ${model} rewrite failed: ${err.message}`);
-        }
-    }
-    throw lastError || new Error('All Gemini models failed to rewrite the timing outlier.');
-}
-
 export const ttsWorker = new Worker('tts', async (job: Job) => {
     const { segments, jobId, videoPath, vocalsAudioPath, speakersMetadata, targetLang, voiceMode } = job.data;
     const mode = voiceMode === 'preset' ? 'preset' : 'clone';
@@ -614,132 +556,48 @@ export const ttsWorker = new Worker('tts', async (job: Job) => {
     await persistSpeakers(jobId, recordedSpeakerVoiceMap, targetLang || 'Spanish', mode)
         .catch((e: any) => console.warn(`[TTS] Warning: could not persist speakers: ${e.message}`));
 
-    // Normalize and measure twice at most: once to detect timing outliers, then once
-    // after every requested regeneration. Duration measurement is a quality gate,
-    // so a normalization/measurement failure is no longer silently ignored.
+    // Normalize once and record durations. The stitcher fits the first take to
+    // its slot at any required speed; duration never triggers another API call.
     const targetLufs = job.data.vocalsLufs || -18.0;
     const speakersLufs = job.data.speakersLoudness || {};
-    async function normalizeAndMeasure(label: string): Promise<Record<string, number>> {
-        console.log(`[TTS] ${label}: normalizing speech to ${targetLufs} LUFS and measuring durations...`);
-        const normFormData = new FormData();
-        normFormData.append('output_dir', outputDir);
-        normFormData.append('target_lufs', targetLufs.toString());
-        normFormData.append('speakers_lufs_json', JSON.stringify(speakersLufs));
-        normFormData.append('segments_json', JSON.stringify(finalSegments));
-        try {
-            const normRes = await axios.post(`${PYTHON_SERVICES_URL}/normalize-tts`, normFormData, {
-                headers: { ...normFormData.getHeaders() },
-                timeout: 10 * 60 * 1000
-            });
-            return normRes.data.durations_sec || {};
-        } catch (err: any) {
-            const detail = err?.response?.data?.detail || err.message;
-            throw new Error(`[TTS] ${label} failed; durations cannot be validated: ${detail}`);
-        }
+    const normFormData = new FormData();
+    normFormData.append('output_dir', outputDir);
+    normFormData.append('target_lufs', targetLufs.toString());
+    normFormData.append('speakers_lufs_json', JSON.stringify(speakersLufs));
+    normFormData.append('segments_json', JSON.stringify(finalSegments));
+    let generatedDurations: Record<string, number>;
+    try {
+        console.log(`[TTS] Normalizing speech to ${targetLufs} LUFS and measuring durations...`);
+        const normRes = await axios.post(`${PYTHON_SERVICES_URL}/normalize-tts`, normFormData, {
+            headers: { ...normFormData.getHeaders() },
+            timeout: 10 * 60 * 1000
+        });
+        generatedDurations = normRes.data.durations_sec || {};
+    } catch (err: any) {
+        const detail = err?.response?.data?.detail || err.message;
+        throw new Error(`[TTS] Audio normalization failed: ${detail}`);
     }
 
-    let generatedDurations = await normalizeAndMeasure('Pass 1');
-    const rewriteCandidates: Array<{
-        index: number;
-        direction: 'shorter' | 'longer';
-        measuredMs: number;
-        targetMs: number;
-    }> = [];
-
-    finalSegments.forEach((seg: any, i: number) => {
-        const base = seg ? path.basename(seg.tts_audio_url) : null;
-        const measured = base ? generatedDurations[base] : undefined;
-        if (measured === undefined) {
-            throw new Error(`[TTS] No measured duration returned for segment ${i} (${base || 'missing file'}).`);
-        }
-        const targetMs = Math.max(200, Number(seg.end_ms) - Number(seg.start_ms));
-        const measuredMs = measured * 1000;
-        const action = durationAction(measuredMs / targetMs, 0);
-        if (action === 'rewrite-shorter' || action === 'rewrite-longer') {
-            rewriteCandidates.push({
-                index: i,
-                direction: action === 'rewrite-shorter' ? 'shorter' : 'longer',
-                measuredMs,
-                targetMs,
-            });
-        }
-    });
-
-    let regenerated = 0;
-    for (const candidate of rewriteCandidates) {
-        const seg = finalSegments[candidate.index];
-        seg.duration_rewrite_attempts = 1;
-        try {
-            const rewritten = await rewriteTranslationForDuration(
-                seg.translated_text,
-                targetLang || 'Spanish',
-                candidate.targetMs,
-                candidate.measuredMs,
-                candidate.direction
-            );
-            const label = seg.speaker_label || 'SPEAKER_00';
-            const target = speakerTargetMap[label] || { mode: 'preset', referenceId: DEFAULT_REFERENCE_ID };
-            const regeneratedPath = path.join(outputDir, `seg_${candidate.index}_regen.mp3`);
-            const ok = await generateWithFailover(
-                rewritten,
-                target,
-                regeneratedPath,
-                activeKeys,
-                candidate.index,
-                `Duration rewrite ${candidate.index + 1}/${segments.length}`,
-                sharedErrorRef
-            );
-            if (!ok) {
-                console.warn(`[TTS Duration] Segment ${candidate.index} could not be regenerated; retaining the first take.`);
-                continue;
-            }
-            fs.copyFileSync(regeneratedPath, seg.tts_audio_url);
-            fs.unlinkSync(regeneratedPath);
-            seg.translated_text = rewritten;
-            seg.regeneration_count = 1;
-            regenerated++;
-            console.log(
-                `[TTS Duration] Segment ${candidate.index} regenerated ${candidate.direction} ` +
-                `(first ratio ${(candidate.measuredMs / candidate.targetMs).toFixed(2)}x).`
-            );
-        } catch (err: any) {
-            console.warn(`[TTS Duration] Segment ${candidate.index} rewrite failed: ${err.message}`);
-        }
-    }
-
-    if (regenerated > 0) {
-        generatedDurations = await normalizeAndMeasure('Pass 2');
-    }
-
-    const hardFailures: string[] = [];
     const withDurations = finalSegments.map((seg: any, i: number) => {
         const base = path.basename(seg.tts_audio_url);
         const measured = generatedDurations[base];
-        if (measured === undefined) {
-            hardFailures.push(`#${i}: duration unavailable`);
-            return seg;
+        if (!Number.isFinite(measured) || measured <= 0) {
+            throw new Error(`[TTS] No usable audio duration for segment ${i} (${base}).`);
         }
-        const targetMs = Math.max(200, Number(seg.end_ms) - Number(seg.start_ms));
-        const generatedMs = Math.round(measured * 1000);
+        const targetMs = Math.max(1, Number(seg.end_ms) - Number(seg.start_ms));
+        const generatedMs = measured * 1000;
         const ratio = generatedMs / targetMs;
-        const action = durationAction(ratio, seg.duration_rewrite_attempts || 0);
+        const action = durationAction(ratio);
         if (action === 'fail') {
-            hardFailures.push(`#${i}: ${ratio.toFixed(2)}x exceeds the 1.25x hard limit after rewrite`);
+            throw new Error(`[TTS] Invalid timing metadata for segment ${i}.`);
         }
         return {
             ...seg,
-            generated_ms: generatedMs,
+            generated_ms: Math.round(generatedMs),
             duration_ratio: Number(ratio.toFixed(3)),
             duration_status: action,
         };
     });
-
-    if (hardFailures.length > 0) {
-        throw new Error(
-            `[TTS] Duration quality gate failed for ${hardFailures.length} segment(s): ` +
-            hardFailures.slice(0, 10).join(' | ')
-        );
-    }
 
     // Pre-stitch all segments into a single continuous audio track to avoid FFmpeg
     // command-line limits on Windows. The buffer length comes from the source video
