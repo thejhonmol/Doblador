@@ -53,7 +53,7 @@ const SCHEMA_STATEMENTS: string[] = [
         translated_text TEXT,
         tts_audio_url TEXT,
         generated_ms INT,
-        speed_used NUMERIC(4, 2) DEFAULT 1.00,
+        speed_used NUMERIC DEFAULT 1.00,
         emotion VARCHAR(32),
         emotion_confidence NUMERIC(4, 3)
     )`,
@@ -65,7 +65,11 @@ const SCHEMA_STATEMENTS: string[] = [
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS original_overlap_ms INT`,
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS actual_overlap_ms INT`,
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS regeneration_count INT DEFAULT 0`,
-    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS duration_ratio NUMERIC(6, 3)`,
+    `ALTER TABLE segments ADD COLUMN IF NOT EXISTS duration_ratio NUMERIC`,
+    // Automatic fitting has no speed ceiling; fixed precision could overflow
+    // after a successful render, preventing the job from reaching assembly.
+    `ALTER TABLE segments ALTER COLUMN speed_used TYPE NUMERIC`,
+    `ALTER TABLE segments ALTER COLUMN duration_ratio TYPE NUMERIC`,
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS sync_status VARCHAR(32)`,
     `ALTER TABLE segments ADD COLUMN IF NOT EXISTS word_timestamps JSONB DEFAULT '[]'::jsonb`,
 

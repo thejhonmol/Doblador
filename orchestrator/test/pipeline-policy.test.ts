@@ -46,14 +46,18 @@ test('recovery resumes at the first incomplete pipeline stage', () => {
     assert.equal(nextIncompleteStage(['extract', 'translate', 'tts', 'assemble']), null);
 });
 
-test('duration policy rewrites outliers once and enforces the hard ceiling', () => {
-    assert.equal(durationAction(0.70), 'rewrite-longer');
-    assert.equal(durationAction(0.70, 1), 'accept');
-    assert.equal(durationAction(1.05), 'accept');
-    assert.equal(durationAction(1.12), 'compress');
-    assert.equal(durationAction(1.22), 'rewrite-shorter');
-    assert.equal(durationAction(1.22, 1), 'compress');
-    assert.equal(durationAction(1.26, 1), 'fail');
+test('duration policy keeps short takes and compresses long takes without a ceiling', () => {
+    assert.equal(durationAction(0.70), 'accept');
+    assert.equal(durationAction(1), 'accept');
+    for (const ratio of [1.005, 1.12, 1.22, 1.26, 2, 6, 12]) {
+        assert.equal(durationAction(ratio), 'compress');
+    }
+});
+
+test('invalid duration measurements still fail', () => {
+    for (const ratio of [0, -1, NaN, Infinity]) {
+        assert.equal(durationAction(ratio), 'fail');
+    }
 });
 
 test('syllable budget is explicit and safe when timestamps are unavailable', () => {

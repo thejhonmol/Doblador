@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS segments (
     translated_text TEXT,
     tts_audio_url TEXT,
     generated_ms INT,
-    speed_used NUMERIC(4, 2) DEFAULT 1.00,
+    speed_used NUMERIC DEFAULT 1.00,
     emotion VARCHAR(32),
     emotion_confidence NUMERIC(4, 3),
     actual_start_ms INT,
@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS segments (
     original_overlap_ms INT,
     actual_overlap_ms INT,
     regeneration_count INT DEFAULT 0,
-    duration_ratio NUMERIC(6, 3),
+    duration_ratio NUMERIC,
     sync_status VARCHAR(32),
     word_timestamps JSONB DEFAULT '[]'::jsonb
 );
